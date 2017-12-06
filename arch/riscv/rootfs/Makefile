@@ -1,0 +1,86 @@
+# check RISCV environment variable
+ifndef RISCV
+$(error Please set environment variable RISCV. Please take a look at README)
+endif
+
+all: rootfs
+
+#--------------------------------------------------------------------
+# Build tools
+#--------------------------------------------------------------------
+
+RISCV_PREFIX=riscv64-unknown-linux-gnu-
+CC = $(RISCV_PREFIX)gcc
+LD = $(RISCV_PREFIX)ld
+RISCV_DUMP = $(RISCV_PREFIX)objdump
+RISCV_COPY = $(RISCV_PREFIX)objcopy
+RISCV_READELF = $(RISCV_PREFIX)readelf
+CFLAGS = -static -Wa,-march=RVIMAFD -ffast-math -fno-builtin-printf -O2 #-fPIC
+RISCV_DUMP_OPTS = -D
+RISCV_LINK_OPTS = -nostdlib -nostartfiles -ffast-math #-lc -lgcc
+
+#--------------------------------------------------------------------
+# Busybox variables
+#--------------------------------------------------------------------
+
+BUSYBOX_REPO_PATH = repo/busybox
+BUSYBOX_ELF_BUILD = $(BUSYBOX_REPO_PATH)/busybox
+BUSYBOX_ELF = build/busybox
+
+#--------------------------------------------------------------------
+# Stream variables
+#--------------------------------------------------------------------
+
+STREAM_REPO_PATH = repo/stream
+STREAM_INT_ELF = build/stream.int
+
+
+#--------------------------------------------------------------------
+# Busybox rules
+#--------------------------------------------------------------------
+
+$(BUSYBOX_REPO_PATH):
+	mkdir -p $@
+	git clone -b 1_25_stable git://git.busybox.net/busybox $@
+	cp config/busybox.config $@/.config
+
+$(BUSYBOX_ELF): $(BUSYBOX_ELF_BUILD) 
+	mkdir -p $(@D)
+	ln -sf $(abspath $<) $@
+
+$(BUSYBOX_ELF_BUILD): | $(BUSYBOX_REPO_PATH)
+	$(MAKE) -C $(@D)
+
+busybox-clean:
+	-$(MAKE) clean -C $(BUSYBOX_REPO_PATH)
+	-rm $(BUSYBOX_ELF)
+
+.PHONY: $(BUSYBOX_ELF_BUILD) busybox-clean
+
+#--------------------------------------------------------------------
+# Stream rules
+#--------------------------------------------------------------------
+
+$(STREAM_REPO_PATH):
+	mkdir -p $@
+	git clone https://github.com/jeffhammond/STREAM $@
+
+$(STREAM_INT_ELF): | $(STREAM_REPO_PATH)
+	mkdir -p $(@D)
+	$(CC) -DSTREAM_ARRAY_SIZE=1000000 -DNTIMES=10 -DSTREAM_TYPE=int $(STREAM_REPO_PATH)/stream.c -o $@
+
+stream-clean:
+	-rm $(STREAM_INT_ELF)
+
+.PHONY: stream-clean
+
+
+#--------------------------------------------------------------------
+# Rootfs top-level rules
+#--------------------------------------------------------------------
+
+rootfs: $(BUSYBOX_ELF) $(STREAM_INT_ELF)
+
+clean: busybox-clean stream-clean
+
+.PHONY: all rootfs rootfs-clean
