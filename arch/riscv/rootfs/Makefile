@@ -9,7 +9,7 @@ all: rootfs
 # Build tools
 #--------------------------------------------------------------------
 
-RISCV_PREFIX=riscv64-unknown-linux-gnu-
+RISCV_PREFIX=riscv64-unknown-elf-
 CC = $(RISCV_PREFIX)gcc
 LD = $(RISCV_PREFIX)ld
 RISCV_DUMP = $(RISCV_PREFIX)objdump
@@ -51,11 +51,13 @@ $(BUSYBOX_ELF): $(BUSYBOX_ELF_BUILD)
 $(BUSYBOX_ELF_BUILD): | $(BUSYBOX_REPO_PATH)
 	$(MAKE) -C $(@D)
 
+busybox: $(BUSYBOX_ELF)
+
 busybox-clean:
 	-$(MAKE) clean -C $(BUSYBOX_REPO_PATH)
 	-rm $(BUSYBOX_ELF)
 
-.PHONY: $(BUSYBOX_ELF_BUILD) busybox-clean
+.PHONY: busybox $(BUSYBOX_ELF_BUILD) busybox-clean
 
 #--------------------------------------------------------------------
 # Stream rules
@@ -65,22 +67,38 @@ $(STREAM_REPO_PATH):
 	mkdir -p $@
 	git clone https://github.com/jeffhammond/STREAM $@
 
-$(STREAM_INT_ELF): | $(STREAM_REPO_PATH)
+$(STREAM_INT_ELF): $(STREAM_REPO_PATH)/stream.c | $(STREAM_REPO_PATH)
 	mkdir -p $(@D)
-	$(CC) -DSTREAM_ARRAY_SIZE=1000000 -DNTIMES=10 -DSTREAM_TYPE=int $(STREAM_REPO_PATH)/stream.c -o $@
+	$(CC) -static -DSTREAM_ARRAY_SIZE=10000 -DNTIMES=2 -DSTREAM_TYPE=int $(STREAM_REPO_PATH)/stream.c -o $@
+
+stream: $(STREAM_INT_ELF)
 
 stream-clean:
 	-rm $(STREAM_INT_ELF)
 
-.PHONY: stream-clean
+.PHONY: stream stream-clean
 
+#--------------------------------------------------------------------
+# Hello rules
+#--------------------------------------------------------------------
+
+HELLO_ELF = build/hello
+
+$(HELLO_ELF): hello/hello.c
+	mkdir -p $(@D)
+	$(CC) -static $< -o $@
+
+hello: $(HELLO_ELF)
+
+.PHONY: hello
 
 #--------------------------------------------------------------------
 # Rootfs top-level rules
 #--------------------------------------------------------------------
 
-rootfs: $(BUSYBOX_ELF) $(STREAM_INT_ELF)
+rootfs: busybox stream hello
 
 clean: busybox-clean stream-clean
+	rm $(HELLO_ELF)
 
 .PHONY: all rootfs rootfs-clean
