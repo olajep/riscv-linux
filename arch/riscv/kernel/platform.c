@@ -31,6 +31,7 @@ static struct platform_device *riscv_devices[] __initdata = {
 
 static int __init riscv_platform_init(void)
 {
+#if 0
 	unsigned long base, size;
 
 	/* We need to query SBI for the ROM's location */
@@ -41,6 +42,7 @@ static int __init riscv_platform_init(void)
 	config_string_resources[0].end   = base + size - 1;
 
 	platform_add_devices(riscv_devices, ARRAY_SIZE(riscv_devices));
+#endif
 	return 0;
 }
 
