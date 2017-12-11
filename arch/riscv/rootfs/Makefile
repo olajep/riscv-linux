@@ -9,7 +9,7 @@ all: rootfs
 # Build tools
 #--------------------------------------------------------------------
 
-RISCV_PREFIX=riscv64-unknown-linux-gnu-
+RISCV_PREFIX=riscv64-unknown-elf-
 CC = $(RISCV_PREFIX)gcc
 LD = $(RISCV_PREFIX)ld
 RISCV_DUMP = $(RISCV_PREFIX)objdump
