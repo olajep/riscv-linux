@@ -93,6 +93,35 @@ hello: $(HELLO_ELF)
 .PHONY: hello
 
 #--------------------------------------------------------------------
+# Redis variables
+#--------------------------------------------------------------------
+
+REDIS_PATH = redis-4.0.2
+REDIS_ELF_BUILD = $(REDIS_PATH)/src/redis-server
+REDIS_ELF = build/redis-server
+
+#--------------------------------------------------------------------
+# Redis rules
+#--------------------------------------------------------------------
+
+$(REDIS_ELF): $(REDIS_ELF_BUILD)
+	mkdir -p $(@D)
+	ln -sf $(abspath $<) $@
+	ln -sf $(abspath $(<D))/redis-benchmark $(@D)/redis-benchmark
+	ln -sf $(abspath $(<D))/redis-cli $(@D)/redis-cli
+
+$(REDIS_ELF_BUILD):
+	$(MAKE) -C $(REDIS_PATH)
+
+redis: $(REDIS_ELF)
+
+redis-clean:
+	-$(MAKE) clean -C $(REDIS_PATH)
+	-rm $(REDIS_ELF)
+
+.PHONY: redis $(REDIS_ELF_BUILD) redis-clean
+
+#--------------------------------------------------------------------
 # Rootfs top-level rules
 #--------------------------------------------------------------------
 
