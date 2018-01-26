@@ -67,7 +67,9 @@ $(STREAM_REPO_PATH):
 	mkdir -p $@
 	git clone https://github.com/jeffhammond/STREAM $@
 
-$(STREAM_INT_ELF): $(STREAM_REPO_PATH)/stream.c | $(STREAM_REPO_PATH)
+$(STREAM_REPO_PATH)/stream.c: | $(STREAM_REPO_PATH)
+
+$(STREAM_INT_ELF): $(STREAM_REPO_PATH)/stream.c
 	mkdir -p $(@D)
 	$(CC) -static -DSTREAM_ARRAY_SIZE=10000 -DNTIMES=2 -DSTREAM_TYPE=int $(STREAM_REPO_PATH)/stream.c -o $@
 
