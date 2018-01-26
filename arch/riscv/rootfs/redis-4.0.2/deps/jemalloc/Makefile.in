@@ -429,10 +429,11 @@ distclean: clean
 	rm -f $(cfgoutputs_out)
 
 relclean: distclean
-	rm -f $(objroot)configure
-	rm -f $(objroot)VERSION
-	rm -f $(DOCS_HTML)
-	rm -f $(DOCS_MAN3)
+	echo "do not execute $@, else VERSION file can not be re-generated"
+	#rm -f $(objroot)configure
+	#rm -f $(objroot)VERSION
+	#rm -f $(DOCS_HTML)
+	#rm -f $(DOCS_MAN3)
 
 #===============================================================================
 # Re-configuration rules.
