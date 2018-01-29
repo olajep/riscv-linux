@@ -39,7 +39,7 @@ file /lib/libpthread.so.0 /opt/riscv-toolchain/sysroot/lib/libpthread.so.0 755 0
 #sort
 file /root/benchmark/sort_single arch/riscv/rootfs/build/single_thread 755 0 0
 file /root/benchmark/sort_multi arch/riscv/rootfs/build/multi_thread 755 0 0
-#file /root/benchmark/s_data.txt arch/riscv/rootfs/build/new.txt 755 0 0
+file /root/benchmark/data.txt arch/riscv/rootfs/sort-openmp/sort_data 755 0 0
 
 nod /dev/console 644 0 0 c 5 1
 nod /dev/null 644 0 0 c 1 3
