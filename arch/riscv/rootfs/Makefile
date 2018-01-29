@@ -95,6 +95,34 @@ hello: $(HELLO_ELF)
 .PHONY: hello
 
 #--------------------------------------------------------------------
+# Sort variables
+#--------------------------------------------------------------------
+
+SORT_PATH = sort-openmp
+SORT_ELF_BUILD = $(SORT_PATH)/multi_thread
+SORT_ELF = build/multi_thread
+
+#--------------------------------------------------------------------
+# Sort rules
+#--------------------------------------------------------------------
+
+$(SORT_ELF): $(SORT_ELF_BUILD)
+	mkdir -p $(@D)
+	ln -sf $(abspath $<) $@
+	ln -sf $(abspath $(<D))/single_thread $(@D)/single_thread
+
+$(SORT_ELF_BUILD):
+	$(MAKE) all -C $(SORT_PATH)
+
+sort: $(SORT_ELF)
+
+sort-clean:
+	-$(MAKE) clean -C $(SORT_PATH)
+	-rm $(SORT_ELF) build/single_thread
+
+.PHONY: sort $(SORT_ELF_BUILD) sort-clean
+
+#--------------------------------------------------------------------
 # Redis variables
 #--------------------------------------------------------------------
 
@@ -127,9 +155,9 @@ redis-clean:
 # Rootfs top-level rules
 #--------------------------------------------------------------------
 
-rootfs: busybox stream hello
+rootfs: busybox redis sort stream hello
 
-clean: busybox-clean stream-clean
+clean: busybox-clean stream-clean redis-clean sort-clean
 	rm $(HELLO_ELF)
 
 .PHONY: all rootfs rootfs-clean
