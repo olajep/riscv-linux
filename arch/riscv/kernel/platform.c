@@ -29,17 +29,20 @@ static struct platform_device *riscv_devices[] __initdata = {
 	&config_string,
 };
 
+char config_buffer[2048];
 static int __init riscv_platform_init(void)
 {
-#if 0
-	unsigned long base, size;
-
+#if 1
+	long size;
 	/* We need to query SBI for the ROM's location */
-	base = sbi_config_string_base();
+	//base = sbi_config_string_base();
 	size = sbi_config_string_size();
-
-	config_string_resources[0].start = base;
-	config_string_resources[0].end   = base + size - 1;
+	long i;
+	for(i=0;i<size;i++)
+	  config_buffer[i]=(char)sbi_config_string_base(i);
+	config_buffer[i]='\0';
+	config_string_resources[0].start = config_buffer;
+	config_string_resources[0].end   = config_buffer + size;
 
 	platform_add_devices(riscv_devices, ARRAY_SIZE(riscv_devices));
 #endif

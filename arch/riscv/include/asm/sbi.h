@@ -26,7 +26,7 @@ void sbi_remote_fence_i(unsigned long hart_mask_ptr);
 
 unsigned long sbi_mask_interrupt(unsigned long which);
 unsigned long sbi_unmask_interrupt(unsigned long which);
-unsigned long sbi_config_string_base(void); // physical address
-unsigned long sbi_config_string_size(void); // includes null terminator
+int sbi_config_string_base(unsigned long offset); //return 1 char in the config string with offset
+unsigned long sbi_config_string_size(void); // not includes null terminator
 
 #endif
