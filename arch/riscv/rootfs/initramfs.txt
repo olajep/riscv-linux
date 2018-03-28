@@ -26,6 +26,7 @@ file /lib/libc.so.6 /opt/riscv-toolchain/sysroot/lib/libc.so.6 755 0 0
 file /lib/libm.so.6 /opt/riscv-toolchain/sysroot/lib/libm.so.6 755 0 0
 file /lib/libdl.so.2 /opt/riscv-toolchain/sysroot/lib/libdl.so.2 755 0 0
 file /lib/libpthread.so.0 /opt/riscv-toolchain/sysroot/lib/libpthread.so.0 755 0 0
+file /lib/librt.so.1 /opt/riscv-toolchain/sysroot/lib/librt.so.1 755 0 0
 
 file /bin/busybox arch/riscv/rootfs/build/busybox 755 0 0
 file /etc/inittab arch/riscv/rootfs/inittab 755 0 0
