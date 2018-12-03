@@ -21,6 +21,7 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/spinlock.h>
+#include <linux/dma-mapping.h>
 
 #define DRV_NAME "riscv-tracectrl"
 
@@ -33,6 +34,9 @@
 struct tracectrl {
 	void __iomem *base_addr;
 	spinlock_t lock;
+	void *dma_buf;
+	dma_addr_t dma_handle;
+	size_t dma_size;
 };
 
 static inline void tracectrl_reg_write(u32 value, struct tracectrl *ctrl,
@@ -78,12 +82,20 @@ static int tracectrl_probe(struct platform_device *pdev)
 
 	spin_lock_init(&ctrl->lock);
 
-	/* TODO: Let kernel allocate buffer ... */
+	/* TODO: Allocate buffer on user request, i.e., not here ... */
+	ctrl->dma_size = SZ_64K;
+	ctrl->dma_buf = dma_alloc_coherent(&pdev->dev, ctrl->dma_size,
+					   &ctrl->dma_handle, GFP_KERNEL);
+	if (!ctrl->dma_buf)
+		return -ENOMEM;
+
 	/* TODO: 64 bit write ... */
-	tracectrl_reg_write(0x00701000, ctrl, TRACECTRL_BUF0_ADDR);
-	tracectrl_reg_write(0x00000001, ctrl, TRACECTRL_BUF0_ADDR + 4);
-	tracectrl_reg_write(0x00000fff, ctrl, TRACECTRL_BUF0_MASK);
-	tracectrl_reg_write(0x00000000, ctrl, TRACECTRL_BUF0_MASK + 4);
+	tracectrl_reg_write((u32) ctrl->dma_handle & 0xffffffff,
+			    ctrl, TRACECTRL_BUF0_ADDR);
+	tracectrl_reg_write((u32) ((long) ctrl->dma_handle >> 32) & 0xffffffff,
+			    ctrl, TRACECTRL_BUF0_ADDR + 4);
+	tracectrl_reg_write(ctrl->dma_size - 1, ctrl, TRACECTRL_BUF0_MASK);
+	tracectrl_reg_write(0, ctrl, TRACECTRL_BUF0_MASK + 4);
 
 	/* HACK: Enable trace ctrl. Should be user knob */
 	tracectrl_reg_write(1, ctrl, TRACECTRL_CONFIG);
@@ -99,6 +111,11 @@ static int tracectrl_probe(struct platform_device *pdev)
  */
 static int tracectrl_remove(struct platform_device *pdev)
 {
+	struct tracectrl *ctrl = platform_get_drvdata(pdev);
+
+	dma_free_coherent(&pdev->dev, ctrl->dma_size, ctrl->dma_buf,
+			  ctrl->dma_handle);
+
 	return 0;
 }
 
