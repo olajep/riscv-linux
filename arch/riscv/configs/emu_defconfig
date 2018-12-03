@@ -562,6 +562,8 @@ CONFIG_SIFIVE_PLIC=y
 #
 # CONFIG_STM is not set
 # CONFIG_INTEL_TH is not set
+CONFIG_OWL=y
+CONFIG_OWL_TRACECTRL=y
 # CONFIG_FPGA is not set
 # CONFIG_FSI is not set
 # CONFIG_SIOX is not set
