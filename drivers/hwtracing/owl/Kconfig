@@ -1,0 +1,17 @@
+#
+# OWL monitoring configuration
+#
+config OWL
+	bool "OWL Monitoring Framework Support"
+	help
+	  This option provides a kernel interface for the OWL Monitoring
+	  framework.
+
+if OWL
+config OWL_TRACECTRL
+	depends on OF
+	tristate "OWL TraceCtrl driver"
+	help
+	  This enables support for the OWL trace controller driver.
+
+endif
