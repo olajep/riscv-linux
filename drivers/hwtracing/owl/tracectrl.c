@@ -113,6 +113,9 @@ static int tracectrl_remove(struct platform_device *pdev)
 {
 	struct tracectrl *ctrl = platform_get_drvdata(pdev);
 
+	/* Disable tracing */
+	tracectrl_reg_write(0, ctrl, TRACECTRL_CONFIG);
+
 	dma_free_coherent(&pdev->dev, ctrl->dma_size, ctrl->dma_buf,
 			  ctrl->dma_handle);
 
