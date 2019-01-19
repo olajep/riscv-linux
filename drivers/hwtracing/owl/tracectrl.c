@@ -56,6 +56,69 @@ static const struct of_device_id tracectrl_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, tracectrl_of_match);
 
+static ssize_t config_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	u32 reg;
+	struct tracectrl *ctrl = dev_get_drvdata(dev);
+
+	reg = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
+
+	return sprintf(buf, "%x\n", reg);
+}
+static DEVICE_ATTR_RO(config);
+
+static ssize_t status_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	u32 reg;
+	struct tracectrl *ctrl = dev_get_drvdata(dev);
+
+	reg = tracectrl_reg_read(ctrl, TRACECTRL_STATUS);
+
+	return sprintf(buf, "%x\n", reg);
+}
+static DEVICE_ATTR_RO(status);
+
+static ssize_t dump_show(struct device *dev, struct device_attribute *attr,
+			 char *buf)
+{
+	size_t i;
+	ssize_t ret, tot = 0;
+	long long *trace;
+	struct tracectrl *ctrl = dev_get_drvdata(dev);
+
+	dma_sync_single_for_cpu(dev, ctrl->dma_handle, ctrl->dma_size,
+				DMA_FROM_DEVICE);
+
+	trace = ctrl->dma_buf;
+	for (i = 0; i < ctrl->dma_size / 8; i++) {
+		/* HACK: We can only dump up to one page */
+		if (tot >= PAGE_SIZE - 20)
+			return tot;
+
+		ret = sprintf(&buf[tot], "0x%016llx\n", trace[i]);
+		if (ret < 0)
+			return ret;
+		tot += ret;
+	}
+	return tot;
+}
+static DEVICE_ATTR_RO(dump);
+
+static struct attribute *tracectrl_attrs[] = {
+	&dev_attr_config.attr,
+	&dev_attr_status.attr,
+	&dev_attr_dump.attr,
+	NULL,
+};
+
+static const struct attribute_group tracectrl_attr_group = {
+	.name = "tracectrl",
+	.attrs = tracectrl_attrs,
+};
+
+
 /**
  * tracectrl_probe - Platform probe for a tracectrl device
  * @pdev:	platform device
@@ -68,6 +131,7 @@ static int tracectrl_probe(struct platform_device *pdev)
 {
 	struct tracectrl *ctrl;
 	struct resource *res;
+	int err;
 
 	ctrl = devm_kzalloc(&pdev->dev, sizeof(*ctrl), GFP_KERNEL);
 	if (!ctrl)
@@ -84,10 +148,18 @@ static int tracectrl_probe(struct platform_device *pdev)
 
 	/* TODO: Allocate buffer on user request, i.e., not here ... */
 	ctrl->dma_size = SZ_64K;
+	/* TODO: Use dma_pool_create so we satisfy hw alignment requirement. */
 	ctrl->dma_buf = dma_alloc_coherent(&pdev->dev, ctrl->dma_size,
 					   &ctrl->dma_handle, GFP_KERNEL);
 	if (!ctrl->dma_buf)
 		return -ENOMEM;
+
+	err = sysfs_create_group(&pdev->dev.kobj, &tracectrl_attr_group);
+	if (err < 0) {
+		dev_dbg(&pdev->dev,
+			"Can't register sysfs attr group: %d\n", err);
+		return err;
+	}
 
 	/* TODO: 64 bit write ... */
 	tracectrl_reg_write((u32) ctrl->dma_handle & 0xffffffff,
@@ -112,6 +184,8 @@ static int tracectrl_probe(struct platform_device *pdev)
 static int tracectrl_remove(struct platform_device *pdev)
 {
 	struct tracectrl *ctrl = platform_get_drvdata(pdev);
+
+	sysfs_remove_group(&pdev->dev.kobj, &tracectrl_attr_group);
 
 	/* Disable tracing */
 	tracectrl_reg_write(0, ctrl, TRACECTRL_CONFIG);
