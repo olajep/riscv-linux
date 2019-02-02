@@ -12,6 +12,7 @@
  * file called COPYING.
  */
 
+#include <linux/kernel.h>
 #include <linux/bitops.h>
 #include <linux/gpio/driver.h>
 #include <linux/init.h>
@@ -22,6 +23,11 @@
 #include <linux/of.h>
 #include <linux/spinlock.h>
 #include <linux/dma-mapping.h>
+#include <linux/idr.h>
+#include <linux/cdev.h>
+#include <uapi/linux/owl.h>
+
+#include <linux/uaccess.h>
 
 #define DRV_NAME "riscv-tracectrl"
 
@@ -30,6 +36,11 @@
 #define TRACECTRL_BUF0_ADDR	0x10 /* base address of trace buffer 0 */
 #define TRACECTRL_BUF0_MASK	0x18 /* mask size of trace buffer 0 */
 
+#define MAX_DEVICES 1
+
+static dev_t tracectrl_devt;
+static struct class tracectrl_class;
+static DEFINE_IDA(tracectrl_ida);
 
 struct tracectrl {
 	void __iomem *base_addr;
@@ -37,6 +48,16 @@ struct tracectrl {
 	void *dma_buf;
 	dma_addr_t dma_handle;
 	size_t dma_size;
+	struct cdev cdev;
+	int minor;
+	struct device dev;
+
+	enum owl_trace_format trace_format;
+	enum owl_metadata_format metadata_format;
+
+	/* Not implemented */
+	pid_t filter_dsid;
+	u32 clock_divider;
 };
 
 static inline void tracectrl_reg_write(u32 value, struct tracectrl *ctrl,
@@ -118,6 +139,172 @@ static const struct attribute_group tracectrl_attr_group = {
 	.attrs = tracectrl_attrs,
 };
 
+union ioctl_arg {
+	struct owl_status	status;
+	struct owl_config	config;
+	struct owl_trace_header	trace_header;
+};
+
+int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
+{
+	u32 val;
+	struct owl_status *status = &arg->status;
+
+	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
+	status->enabled = val & 1;
+
+	/* TODO: Rework */
+	status->tracebuf_size = ctrl->dma_size;
+	status->metadatabuf_size = 0;
+
+	return 0;
+}
+
+int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
+{
+	extern int pid_max;
+	struct owl_config *config = &arg->config;
+
+	switch (config->trace_format) {
+	case OWL_TRACE_FORMAT_DEFAULT:
+		break;
+	default:
+		return -EINVAL;
+	}
+	ctrl->trace_format = config->metadata_format;
+
+	switch (config->metadata_format) {
+	case OWL_METADATA_FORMAT_DEFAULT:
+		break;
+	default:
+		return -EINVAL;
+	}
+	ctrl->metadata_format = config->metadata_format;
+
+	/* TODO: Rework */
+	if (config->dsid &&
+	    (config->dsid < 1 || config->dsid >= pid_max)) {
+		return -EINVAL;
+	}
+	ctrl->filter_dsid = config->dsid;
+
+	ctrl->clock_divider = config->clock_divider ?: 1;
+
+	return 0;
+}
+
+int ioctl_enable(struct tracectrl *ctrl, union ioctl_arg __always_unused *arg)
+{
+	u32 val;
+
+	/* lock */
+	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
+	val |= 1;
+	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
+	/* unlock */
+
+	return 0;
+}
+
+int ioctl_disable(struct tracectrl *ctrl, union ioctl_arg __always_unused *arg)
+{
+	u32 val;
+
+	/* lock */
+	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
+	val &= ~1;
+	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
+	/* unlock */
+
+	return 0;
+}
+
+static const size_t owl_trace_sizes[] = {
+	[OWL_TRACE_FORMAT_DEFAULT] = sizeof(struct owl_trace_entry_default),
+};
+
+int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
+{
+	u32 reg;
+	size_t tracebuf_size;
+	const size_t entry_size = owl_trace_sizes[ctrl->trace_format];
+	struct owl_trace_header *header = &arg->trace_header;
+
+	/* lock */
+	reg = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
+	/* unlock */
+
+	if (reg & 1) /* enabled */
+		return -EBUSY;
+
+	/* TODO: Rework */
+	header->trace_format = ctrl->trace_format;
+	header->metadata_format = ctrl->metadata_format;
+	tracebuf_size = min(ctrl->dma_size, (size_t)header->tracebuf_size);
+	header->trace_entries = tracebuf_size / entry_size;
+	header->metadata_entries = 0;
+
+	dma_sync_single_for_cpu(&ctrl->dev, ctrl->dma_handle, tracebuf_size,
+				DMA_FROM_DEVICE);
+	if (copy_to_user(header->tracebuf, ctrl->dma_buf, tracebuf_size))
+		return -EFAULT;
+
+	return 0;
+}
+
+
+static int (* const ioctl_handlers[])(struct tracectrl *, union ioctl_arg *) = {
+	[_IOC_NR(OWL_IOCTL_STATUS)]	= ioctl_get_status,
+	[_IOC_NR(OWL_IOCTL_CONFIG)]	= ioctl_set_config,
+	[_IOC_NR(OWL_IOCTL_ENABLE)]	= ioctl_enable,
+	[_IOC_NR(OWL_IOCTL_DISABLE)]	= ioctl_disable,
+	[_IOC_NR(OWL_IOCTL_DUMP)]	= ioctl_dump_trace,
+};
+
+static long tracectrl_ioctl(struct file *file, unsigned int cmd,
+			    unsigned long arg)
+{
+	union ioctl_arg buf;
+	int ret;
+	struct tracectrl *ctrl = file->private_data;
+
+	if (_IOC_TYPE(cmd) != OWL_IOCTL_BASE ||
+	    _IOC_NR(cmd) >= ARRAY_SIZE(ioctl_handlers) ||
+	    _IOC_SIZE(cmd) > sizeof(buf))
+		return -ENOTTY;
+
+	memset(&buf, 0, sizeof(buf));
+
+	if (_IOC_DIR(cmd) & _IOC_WRITE)
+		if (copy_from_user(&buf, (void __user *)arg, _IOC_SIZE(cmd)))
+			return -EFAULT;
+
+	ret = ioctl_handlers[_IOC_NR(cmd)](ctrl, &buf);
+	if (ret < 0)
+		return ret;
+
+	if (_IOC_DIR(cmd) & _IOC_READ)
+		if (copy_to_user((void __user *)arg, &buf, _IOC_SIZE(cmd)))
+			return -EFAULT;
+
+	return ret;
+}
+
+static int tracectrl_open(struct inode *inode, struct file *file)
+{
+	struct tracectrl *ctrl;
+
+	ctrl = container_of(inode->i_cdev, struct tracectrl, cdev);
+	file->private_data = ctrl;
+
+	return nonseekable_open(inode, file);
+}
+
+static const struct file_operations tracectrl_fops = {
+	.owner		= THIS_MODULE,
+	.unlocked_ioctl	= tracectrl_ioctl,
+	.open		= tracectrl_open,
+};
 
 /**
  * tracectrl_probe - Platform probe for a tracectrl device
@@ -130,8 +317,9 @@ static const struct attribute_group tracectrl_attr_group = {
 static int tracectrl_probe(struct platform_device *pdev)
 {
 	struct tracectrl *ctrl;
-	struct resource *res;
-	int err;
+	struct resource *resource;
+	int res = 0;
+	dev_t devt;
 
 	ctrl = devm_kzalloc(&pdev->dev, sizeof(*ctrl), GFP_KERNEL);
 	if (!ctrl)
@@ -139,27 +327,60 @@ static int tracectrl_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, ctrl);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	ctrl->base_addr = devm_ioremap_resource(&pdev->dev, res);
+	resource = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	ctrl->base_addr = devm_ioremap_resource(&pdev->dev, resource);
 	if (IS_ERR(ctrl->base_addr))
 		return PTR_ERR(ctrl->base_addr);
 
 	spin_lock_init(&ctrl->lock);
 
+	res = sysfs_create_group(&pdev->dev.kobj, &tracectrl_attr_group);
+	if (res < 0) {
+		dev_err(&pdev->dev,
+			"Can't register sysfs attr group: %d\n", res);
+		return res;
+	}
+
+	/* This creates the minor number for the RPMB char device */
+	res = ida_simple_get(&tracectrl_ida, 0, MAX_DEVICES, GFP_KERNEL);
+	if (res < 0) {
+		dev_err(&pdev->dev,
+			"Can't register sysfs attr group: %d\n", res);
+		goto out_sysfs_remove;
+	}
+
+	ctrl->minor = res;
+	devt = MKDEV(MAJOR(tracectrl_devt), ctrl->minor);
+	cdev_init(&ctrl->cdev, &tracectrl_fops);
+	ctrl->cdev.owner = THIS_MODULE;
+
+	res = cdev_add(&ctrl->cdev, devt, 1);
+	if (res) {
+		dev_err(&ctrl->dev,
+			"char device registration failed\n");
+		goto out_minor_remove;
+	}
+	ctrl->dev.class = &tracectrl_class;
+	ctrl->dev.parent = pdev->dev.parent; /* no??? */
+	ctrl->dev.devt = devt;
+	ctrl->dev.groups = NULL;
+	ctrl->dev.release = NULL; //mesh_device_release;
+	dev_set_name(&ctrl->dev, "tracectrl%d", ctrl->minor);
+	ctrl->dev.devt = devt;
+	res = device_register(&ctrl->dev);
+	if (res)
+		goto out_minor_remove;
+
 	/* TODO: Allocate buffer on user request, i.e., not here ... */
 	ctrl->dma_size = SZ_64K;
 	/* TODO: Use dma_pool_create so we satisfy hw alignment requirement. */
-	ctrl->dma_buf = dma_alloc_coherent(&pdev->dev, ctrl->dma_size,
+	ctrl->dma_buf = dma_alloc_coherent(&ctrl->dev, ctrl->dma_size,
 					   &ctrl->dma_handle, GFP_KERNEL);
-	if (!ctrl->dma_buf)
-		return -ENOMEM;
-
-	err = sysfs_create_group(&pdev->dev.kobj, &tracectrl_attr_group);
-	if (err < 0) {
-		dev_dbg(&pdev->dev,
-			"Can't register sysfs attr group: %d\n", err);
-		return err;
+	if (!ctrl->dma_buf) {
+		res = -ENOMEM;
+		goto out_device_destroy;
 	}
+
 
 	/* TODO: 64 bit write ... */
 	tracectrl_reg_write((u32) ctrl->dma_handle & 0xffffffff,
@@ -169,10 +390,17 @@ static int tracectrl_probe(struct platform_device *pdev)
 	tracectrl_reg_write(ctrl->dma_size - 1, ctrl, TRACECTRL_BUF0_MASK);
 	tracectrl_reg_write(0, ctrl, TRACECTRL_BUF0_MASK + 4);
 
-	/* HACK: Enable trace ctrl. Should be user knob */
 	tracectrl_reg_write(1, ctrl, TRACECTRL_CONFIG);
 
 	return 0;
+
+out_device_destroy:
+	device_destroy(&tracectrl_class, devt);
+out_minor_remove:
+	ida_simple_remove(&tracectrl_ida, ctrl->minor);
+out_sysfs_remove:
+	sysfs_remove_group(&pdev->dev.kobj, &tracectrl_attr_group);
+	return res;
 }
 
 /**
@@ -190,7 +418,7 @@ static int tracectrl_remove(struct platform_device *pdev)
 	/* Disable tracing */
 	tracectrl_reg_write(0, ctrl, TRACECTRL_CONFIG);
 
-	dma_free_coherent(&pdev->dev, ctrl->dma_size, ctrl->dma_buf,
+	dma_free_coherent(&ctrl->dev, ctrl->dma_size, ctrl->dma_buf,
 			  ctrl->dma_handle);
 
 	return 0;
@@ -204,7 +432,55 @@ static struct platform_driver tracectrl_driver = {
 	.probe = tracectrl_probe,
 	.remove = tracectrl_remove,
 };
+
+static void tracectrl_device_release(struct device *dev)
+{
+	/* No-op since we use devm_* */
+}
+
+static char *tracectrl_devnode(struct device *dev, umode_t *mode)
+{
+	//return kasprintf(GFP_KERNEL, "tracectrl/%s", dev_name(dev));
+	return kasprintf(GFP_KERNEL, "%s", dev_name(dev));
+	//return dev_name(dev);
+}
+
+static int __init tracectrl_module_init(void)
+{
+	int res;
+
+	tracectrl_class.name = "tracectrl";
+	tracectrl_class.owner = THIS_MODULE;
+	tracectrl_class.devnode = tracectrl_devnode;
+	tracectrl_class.dev_release = tracectrl_device_release;
+
+	res = class_register(&tracectrl_class);
+	if (res) {
+		pr_err("Unable to register tracectrl class\n");
+		return res;
+	}
+
+	res = alloc_chrdev_region(&tracectrl_devt, 0, MAX_DEVICES,
+				  "tracectrl");
+	if (res < 0) {
+		pr_err("Failed to allocate tracectrl chrdev region %d\n", res);
+		goto out_class_unregister;
+	}
+	return 0;
+out_class_unregister:
+	class_unregister(&tracectrl_class);
+	return res;
+}
+
+static void __exit tracectrl_module_exit(void)
+{
+	class_unregister(&tracectrl_class);
+	unregister_chrdev_region(tracectrl_devt, MAX_DEVICES);
+}
+
 module_platform_driver(tracectrl_driver);
+module_init(tracectrl_module_init);
+module_exit(tracectrl_module_exit);
 
 MODULE_AUTHOR("Ola Jeppsson <ola.jeppsson@gmail.com>");
 MODULE_DESCRIPTION("OWL TraceCtrl driver");
