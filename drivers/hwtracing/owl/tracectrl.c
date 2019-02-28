@@ -104,26 +104,15 @@ static DEVICE_ATTR_RO(status);
 static ssize_t dump_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
-	size_t i;
-	ssize_t ret, tot = 0;
-	u64 *trace;
+	ssize_t n;
 	struct tracectrl *ctrl = dev_get_drvdata(dev);
 
 	dma_sync_single_for_cpu(dev, ctrl->dma_handle, ctrl->dma_size,
 				DMA_FROM_DEVICE);
+	n = min(ctrl->dma_size, PAGE_SIZE - 8);
+	memcpy(buf, ctrl->dma_buf, n);
 
-	trace = ctrl->dma_buf;
-	for (i = 0; i < ctrl->dma_size / 8; i++) {
-		/* HACK: We can only dump up to one page */
-		if (tot >= PAGE_SIZE - 20)
-			return tot;
-
-		ret = sprintf(&buf[tot], "0x%016llx\n", (long long) trace[i]);
-		if (ret < 0)
-			return ret;
-		tot += ret;
-	}
-	return tot;
+	return n;
 }
 static DEVICE_ATTR_RO(dump);
 
