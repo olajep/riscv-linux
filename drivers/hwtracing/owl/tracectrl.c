@@ -192,7 +192,7 @@ int ioctl_enable(struct tracectrl *ctrl, union ioctl_arg __always_unused *arg)
 
 	/* lock */
 	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
-	val |= 1;
+	val |= 3; /* enable | irq_en */
 	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
 	/* unlock */
 
@@ -310,6 +310,46 @@ static const struct file_operations tracectrl_fops = {
 	.open		= tracectrl_open,
 };
 
+
+static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
+{
+	struct tracectrl *ctrl = dev_id;
+	u32 status;
+	unsigned long reg;
+
+	/* The RISC-V PLIC does not support?!? edge triggered interrupts (at
+	 * least not the devicetree binding since there are no flags) so work
+	 * around it by disabling the interrupt for now. Guess we'll have to
+	 * implement this in hardware eventually. Sigh. */
+
+	/* lock */
+	status = tracectrl_reg_read(ctrl, TRACECTRL_STATUS);
+	/* unlock */
+
+	if (status & 1 /* buf0_full */) {
+		status = 1;
+		reg = TRACECTRL_BUF0_ADDR;
+	} else if (status & 2 /* buf1_full */) {
+		status = 2;
+		reg = TRACECTRL_BUF1_ADDR;
+	}
+
+	if (status & 3) {
+		/* TODO: Allocate more DMA memory suitable for trace buffer
+		 * here, and add it to a linked list. */
+
+		/* lock */
+		/* TODO: Swap the buffer pointer here */
+		(void)reg;
+		tracectrl_reg_write(status, ctrl, TRACECTRL_STATUS);
+		/* unlock */
+	}
+
+	printk(KERN_INFO "tracectrl interrupt %u\n", status);
+
+	return IRQ_HANDLED;
+}
+
 /**
  * tracectrl_probe - Platform probe for a tracectrl device
  * @pdev:	platform device
@@ -322,7 +362,7 @@ static int tracectrl_probe(struct platform_device *pdev)
 {
 	struct tracectrl *ctrl;
 	struct resource *resource;
-	int res = 0;
+	int res = 0, irq;
 	dev_t devt;
 
 	ctrl = devm_kzalloc(&pdev->dev, sizeof(*ctrl), GFP_KERNEL);
@@ -335,6 +375,21 @@ static int tracectrl_probe(struct platform_device *pdev)
 	ctrl->base_addr = devm_ioremap_resource(&pdev->dev, resource);
 	if (IS_ERR(ctrl->base_addr))
 		return PTR_ERR(ctrl->base_addr);
+
+	/* Interrupt */
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0) {
+		dev_err(&pdev->dev, "Could not get IRQ from platform data\n");
+		return irq;
+	}
+
+	res = devm_request_irq(&pdev->dev, irq, tracectrl_irq_handler, 0,
+			dev_name(&pdev->dev), ctrl);
+	if (res) {
+		dev_err(&pdev->dev, "Could not request IRQ\n");
+		return res;
+	}
+
 
 	spin_lock_init(&ctrl->lock);
 
