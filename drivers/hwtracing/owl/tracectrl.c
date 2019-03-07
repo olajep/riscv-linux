@@ -35,6 +35,8 @@
 #define TRACECTRL_STATUS	0x04 /* status register */
 #define TRACECTRL_BUF0_ADDR	0x10 /* base address of trace buffer 0 */
 #define TRACECTRL_BUF0_MASK	0x18 /* mask size of trace buffer 0 */
+#define TRACECTRL_BUF1_ADDR	0x20 /* base address of trace buffer 1 */
+#define TRACECTRL_BUF1_MASK	0x28 /* mask size of trace buffer 1 */
 
 #define MAX_DEVICES 1 /* TODO: (num_possible_cpus()) */
 
@@ -45,9 +47,11 @@ static DEFINE_IDA(tracectrl_ida);
 struct tracectrl {
 	void __iomem *base_addr;
 	spinlock_t lock;
-	void *dma_buf;
-	dma_addr_t dma_handle;
 	size_t dma_size;
+	void *dma_buf0;
+	dma_addr_t dma_handle0;
+	void *dma_buf1;
+	dma_addr_t dma_handle1;
 	struct cdev cdev;
 	int minor;
 	struct device dev;
@@ -107,10 +111,10 @@ static ssize_t dump_show(struct device *dev, struct device_attribute *attr,
 	ssize_t n;
 	struct tracectrl *ctrl = dev_get_drvdata(dev);
 
-	dma_sync_single_for_cpu(dev, ctrl->dma_handle, ctrl->dma_size,
+	dma_sync_single_for_cpu(dev, ctrl->dma_handle0, ctrl->dma_size,
 				DMA_FROM_DEVICE);
 	n = min(ctrl->dma_size, PAGE_SIZE - 8);
-	memcpy(buf, ctrl->dma_buf, n);
+	memcpy(buf, ctrl->dma_buf0, n);
 
 	return n;
 }
@@ -143,7 +147,7 @@ int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 	status->enabled = val & 1;
 
 	/* TODO: Rework */
-	status->tracebuf_size = ctrl->dma_size;
+	status->tracebuf_size = 2 * ctrl->dma_size;
 	status->metadatabuf_size = 0;
 
 	return 0;
@@ -216,7 +220,6 @@ int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
 	u32 reg;
 	size_t tracebuf_size;
-	const size_t entry_size = owl_trace_sizes[ctrl->trace_format];
 	struct owl_trace_header *header = &arg->trace_header;
 
 	/* lock */
@@ -229,14 +232,26 @@ int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 	/* TODO: Rework */
 	header->trace_format = ctrl->trace_format;
 	header->metadata_format = ctrl->metadata_format;
-	tracebuf_size = min(ctrl->dma_size, (size_t)header->tracebuf_size);
-	header->trace_entries = tracebuf_size / entry_size;
-	header->metadata_entries = 0;
+	tracebuf_size = min(2 * ctrl->dma_size, (size_t)header->tracebuf_size);
+	header->tracebuf_size = tracebuf_size;
 
-	dma_sync_single_for_cpu(&ctrl->dev, ctrl->dma_handle, tracebuf_size,
+	dma_sync_single_for_cpu(&ctrl->dev, ctrl->dma_handle0,
+				min(ctrl->dma_size, (size_t)tracebuf_size),
 				DMA_FROM_DEVICE);
-	if (copy_to_user(header->tracebuf, ctrl->dma_buf, tracebuf_size))
+	dma_sync_single_for_cpu(&ctrl->dev, ctrl->dma_handle1,
+				min(ctrl->dma_size, (size_t)tracebuf_size),
+				DMA_FROM_DEVICE);
+	if (copy_to_user(header->tracebuf, ctrl->dma_buf0,
+				min(ctrl->dma_size, (size_t)tracebuf_size)))
 		return -EFAULT;
+
+	if (tracebuf_size > ctrl->dma_size) {
+		if (copy_to_user((u8 *) header->tracebuf + ctrl->dma_size,
+				 ctrl->dma_buf1,
+				 min(ctrl->dma_size,
+				     (size_t)tracebuf_size - ctrl->dma_size)))
+			return -EFAULT;
+	}
 
 	return 0;
 }
@@ -364,26 +379,38 @@ static int tracectrl_probe(struct platform_device *pdev)
 	/* TODO: Allocate buffer on user request, i.e., not here ... */
 	ctrl->dma_size = SZ_64K;
 	/* TODO: Use dma_pool_create so we satisfy hw alignment requirement. */
-	ctrl->dma_buf = dma_alloc_coherent(&ctrl->dev, ctrl->dma_size,
-					   &ctrl->dma_handle, GFP_KERNEL);
-	if (!ctrl->dma_buf) {
+	ctrl->dma_buf0 = dma_alloc_coherent(&ctrl->dev, ctrl->dma_size,
+					    &ctrl->dma_handle0, GFP_KERNEL);
+	if (!ctrl->dma_buf0) {
 		res = -ENOMEM;
 		goto out_device_destroy;
 	}
-
+	ctrl->dma_buf1 = dma_alloc_coherent(&ctrl->dev, ctrl->dma_size,
+					    &ctrl->dma_handle1, GFP_KERNEL);
+	if (!ctrl->dma_buf1) {
+		res = -ENOMEM;
+		goto out_free_dma_buf0;
+	}
 
 	/* TODO: 64 bit write ... */
-	tracectrl_reg_write((u32) ctrl->dma_handle & 0xffffffff,
+	tracectrl_reg_write((u32) ctrl->dma_handle0 & 0xffffffff,
 			    ctrl, TRACECTRL_BUF0_ADDR);
-	tracectrl_reg_write((u32) ((long) ctrl->dma_handle >> 32) & 0xffffffff,
+	tracectrl_reg_write((u32) ((long) ctrl->dma_handle0 >> 32) & 0xffffffff,
 			    ctrl, TRACECTRL_BUF0_ADDR + 4);
 	tracectrl_reg_write(ctrl->dma_size - 1, ctrl, TRACECTRL_BUF0_MASK);
 	tracectrl_reg_write(0, ctrl, TRACECTRL_BUF0_MASK + 4);
-
-	tracectrl_reg_write(1, ctrl, TRACECTRL_CONFIG);
+	tracectrl_reg_write((u32) ctrl->dma_handle1 & 0xffffffff,
+			    ctrl, TRACECTRL_BUF1_ADDR);
+	tracectrl_reg_write((u32) ((long) ctrl->dma_handle1 >> 32) & 0xffffffff,
+			    ctrl, TRACECTRL_BUF1_ADDR + 4);
+	tracectrl_reg_write(ctrl->dma_size - 1, ctrl, TRACECTRL_BUF1_MASK);
+	tracectrl_reg_write(0, ctrl, TRACECTRL_BUF1_MASK + 4);
 
 	return 0;
 
+out_free_dma_buf0:
+	dma_free_coherent(&ctrl->dev, ctrl->dma_size, ctrl->dma_buf0,
+			  ctrl->dma_handle0);
 out_device_destroy:
 	device_destroy(&tracectrl_class, devt);
 out_minor_remove:
@@ -408,8 +435,10 @@ static int tracectrl_remove(struct platform_device *pdev)
 	/* Disable tracing */
 	tracectrl_reg_write(0, ctrl, TRACECTRL_CONFIG);
 
-	dma_free_coherent(&ctrl->dev, ctrl->dma_size, ctrl->dma_buf,
-			  ctrl->dma_handle);
+	dma_free_coherent(&ctrl->dev, ctrl->dma_size, ctrl->dma_buf0,
+			  ctrl->dma_handle0);
+	dma_free_coherent(&ctrl->dev, ctrl->dma_size, ctrl->dma_buf1,
+			  ctrl->dma_handle1);
 
 	return 0;
 }
