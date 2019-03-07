@@ -2,7 +2,7 @@
 #define _OWL_H_
 
 #include <linux/types.h>
-#include <asm/ioctl.h>
+#include <linux/ioctl.h>
 
 #if defined(__cplusplus)
 extern "C" {
@@ -17,8 +17,8 @@ struct owl_status {
 		__kernel_pid_t ppid;
 		__kernel_pid_t cgroup;
 	};
-	u64 tracebuf_size;
-	u64 metadatabuf_size;
+	__u64 tracebuf_size;
+	__u64 metadatabuf_size;
 };
 
 enum owl_trace_format {
@@ -32,7 +32,7 @@ enum owl_metadata_format {
 struct owl_config {
 	enum owl_trace_format trace_format;
 	enum owl_metadata_format metadata_format; /* ??? Do we need this */
-	u32 clock_divider; /* How many clocks per tick */
+	__u32 clock_divider; /* How many clocks per tick */
 	union {
 		/* TODO: Decide on which one to use. Seems LvNA Linux are
 		 * working on mapping dsid to cgroup. */
@@ -49,24 +49,24 @@ struct owl_trace_entry_default {
 } __packed;
 
 struct owl_metadata_entry {
-	u64 str_offset; /* Offset from owl_trace_header->metadata to exec string */
+	__u64 str_offset; /* Offset from owl_trace_header->metadata to exec string */
 	unsigned timestamp:20; /* When process was scheduled in */
 	/* Map ??? */
-	/* u64 text_offset //  ???: If we wan't the user space callsite */
+	/* __u64 text_offset //  ???: If we wan't the user space callsite */
 };
 
 struct owl_trace_header {
 	/* Filled in by user */
 	void __user *tracebuf;		/* Buffer for traces */
 	void __user *metadatabuf;	/* Buffer for meta data */
-	u64 tracebuf_size;
-	u64 metadatabuf_size;
+	__u64 tracebuf_size;
+	__u64 metadatabuf_size;
 
 	/* Filled in by kernel */
 	enum owl_trace_format trace_format;
 	enum owl_metadata_format metadata_format;
-	u64 trace_entries;	/* Number of trace entries */
-	u64 metadata_entries;	/* Number of kernel meta data entries */
+	__u64 trace_entries;	/* Number of trace entries */
+	__u64 metadata_entries;	/* Number of kernel meta data entries */
 };
 
 #define OWL_IOCTL_BASE			'o'
