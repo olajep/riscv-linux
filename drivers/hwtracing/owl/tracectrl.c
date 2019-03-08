@@ -273,7 +273,7 @@ static int (* const ioctl_handlers[])(struct tracectrl *, union ioctl_arg *) = {
 static long tracectrl_ioctl(struct file *file, unsigned int cmd,
 			    unsigned long arg)
 {
-	union ioctl_arg buf;
+	union ioctl_arg buf = { 0 };
 	int ret;
 	struct tracectrl *ctrl = file->private_data;
 
@@ -281,8 +281,6 @@ static long tracectrl_ioctl(struct file *file, unsigned int cmd,
 	    _IOC_NR(cmd) >= ARRAY_SIZE(ioctl_handlers) ||
 	    _IOC_SIZE(cmd) > sizeof(buf))
 		return -ENOTTY;
-
-	memset(&buf, 0, sizeof(buf));
 
 	if (_IOC_DIR(cmd) & _IOC_WRITE)
 		if (copy_from_user(&buf, (void __user *)arg, _IOC_SIZE(cmd)))
