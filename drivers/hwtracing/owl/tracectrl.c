@@ -23,6 +23,7 @@
 #include <linux/of.h>
 #include <linux/spinlock.h>
 #include <linux/dma-mapping.h>
+#include <linux/dmapool.h>
 #include <linux/idr.h>
 #include <linux/cdev.h>
 #include <uapi/linux/owl.h>
@@ -51,18 +52,24 @@ static dev_t tracectrl_devt;
 static struct class tracectrl_class;
 static DEFINE_IDA(tracectrl_ida);
 
+struct tracectrl_dma_buf {
+	void *buf;
+	dma_addr_t handle;
+};
+
 struct tracectrl {
 	bool enabled;
 	void __iomem *base_addr;
 	spinlock_t lock;
-	size_t dma_size;
-	void *dma_buf0;
-	dma_addr_t dma_handle0;
-	void *dma_buf1;
-	dma_addr_t dma_handle1;
+
 	struct cdev cdev;
 	int minor;
 	struct device dev;
+
+	size_t dma_size;
+	struct dma_pool *dma_pool;
+	struct tracectrl_dma_buf dma_bufs[1024];
+	size_t used_dma_bufs;
 
 	enum owl_trace_format trace_format;
 	enum owl_metadata_format metadata_format;
@@ -119,10 +126,13 @@ static ssize_t dump_show(struct device *dev, struct device_attribute *attr,
 	ssize_t n;
 	struct tracectrl *ctrl = dev_get_drvdata(dev);
 
-	dma_sync_single_for_cpu(dev, ctrl->dma_handle0, ctrl->dma_size,
+	if (!ctrl->used_dma_bufs)
+		return 0;
+
+	dma_sync_single_for_cpu(dev, ctrl->dma_bufs[0].handle, ctrl->dma_size,
 				DMA_FROM_DEVICE);
 	n = min(ctrl->dma_size, PAGE_SIZE - 8);
-	memcpy(buf, ctrl->dma_buf0, n);
+	memcpy(buf, ctrl->dma_bufs[0].buf, n);
 
 	return n;
 }
@@ -221,16 +231,66 @@ static void tracectrl_update_buf(struct tracectrl *ctrl, unsigned long base,
 	}
 }
 
+
+static void tracectrl_free_all_dma_bufs(struct tracectrl *ctrl)
+{
+	struct tracectrl_dma_buf *buf;
+
+	while (ctrl->used_dma_bufs) {
+		ctrl->used_dma_bufs--;
+		buf = &ctrl->dma_bufs[ctrl->used_dma_bufs];
+		dma_pool_free(ctrl->dma_pool, buf->buf, buf->handle);
+	}
+}
+
+/* Need to rework since we can't do any locking in interrupt handler */
+static struct tracectrl_dma_buf *
+tracectrl_dma_buf_alloc(struct tracectrl *ctrl, gfp_t gfp_flags)
+{
+	struct tracectrl_dma_buf *buf;
+
+	if (ctrl->used_dma_bufs >= ARRAY_SIZE(ctrl->dma_bufs))
+		return NULL;
+
+	buf = &ctrl->dma_bufs[ctrl->used_dma_bufs];
+
+	buf->buf = dma_pool_alloc(ctrl->dma_pool, gfp_flags, &buf->handle);
+
+	if (buf->buf)
+		ctrl->used_dma_bufs++;
+
+	return buf;
+}
+
+/* Redo locking?!? */
 static int ioctl_enable(struct tracectrl *ctrl,
 			union ioctl_arg __always_unused *arg)
 {
 	u32 val;
+
+	struct tracectrl_dma_buf *buf0, *buf1;
 
 	/* lock */
 	if (ctrl->enabled) {
 		/* unlock */
 		return 0; /* Idempotent. Or is -EBUSY better? */
 	}
+
+	/* unlock */
+
+	tracectrl_free_all_dma_bufs(ctrl);
+	buf0 = tracectrl_dma_buf_alloc(ctrl, GFP_KERNEL);
+	buf1 = tracectrl_dma_buf_alloc(ctrl, GFP_KERNEL);
+	if (!buf0 || !buf1) {
+		tracectrl_free_all_dma_bufs(ctrl);
+		return -ENOMEM;
+	}
+
+	tracectrl_update_buf(ctrl, TRACECTRL_BUF0_ADDR, buf0->handle,
+			     ctrl->dma_size - 1, true);
+
+	tracectrl_update_buf(ctrl, TRACECTRL_BUF1_ADDR, buf1->handle,
+			     ctrl->dma_size - 1, true);
 
 	ctrl->enabled = true;
 	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
@@ -271,26 +331,22 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 	/* TODO: Rework */
 	header->trace_format = ctrl->trace_format;
 	header->metadata_format = ctrl->metadata_format;
-	tracebuf_size = min(2 * ctrl->dma_size, (size_t)header->tracebuf_size);
+
+	if (!ctrl->used_dma_bufs) {
+		header->tracebuf_size = 0;
+		return 0;
+	}
+
+	/* TODO: Loop over all allocated buffers (and clear them?) */
+	tracebuf_size = min(1 * ctrl->dma_size, (size_t)header->tracebuf_size);
 	header->tracebuf_size = tracebuf_size;
 
-	dma_sync_single_for_cpu(&ctrl->dev, ctrl->dma_handle0,
+	dma_sync_single_for_cpu(&ctrl->dev, ctrl->dma_bufs[0].handle,
 				min(ctrl->dma_size, (size_t)tracebuf_size),
 				DMA_FROM_DEVICE);
-	dma_sync_single_for_cpu(&ctrl->dev, ctrl->dma_handle1,
-				min(ctrl->dma_size, (size_t)tracebuf_size),
-				DMA_FROM_DEVICE);
-	if (copy_to_user(header->tracebuf, ctrl->dma_buf0,
+	if (copy_to_user(header->tracebuf, ctrl->dma_bufs[0].buf,
 				min(ctrl->dma_size, (size_t)tracebuf_size)))
 		return -EFAULT;
-
-	if (tracebuf_size > ctrl->dma_size) {
-		if (copy_to_user((u8 *) header->tracebuf + ctrl->dma_size,
-				 ctrl->dma_buf1,
-				 min(ctrl->dma_size,
-				     (size_t)tracebuf_size - ctrl->dma_size)))
-			return -EFAULT;
-	}
 
 	return 0;
 }
@@ -348,41 +404,40 @@ static const struct file_operations tracectrl_fops = {
 };
 
 
+/* TODO: Redo / implement locking */
 static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 {
 	struct tracectrl *ctrl = dev_id;
-	u32 status, clear = 0;
-	unsigned long reg;
-
-	/* The RISC-V PLIC does not support?!? edge triggered interrupts (at
-	 * least not the devicetree binding since there are no flags) so work
-	 * around it by disabling the interrupt for now. Guess we'll have to
-	 * implement this in hardware eventually. Sigh. */
+	u32 config, status;
+	dma_addr_t addr = 0;
+	unsigned long reg = 0;
+	struct tracectrl_dma_buf *buf;
 
 	/* lock */
 	status = tracectrl_reg_read(ctrl, TRACECTRL_STATUS);
 	/* unlock */
 
 	if (status & STATUS_BUF0_FULL) {
-		clear = STATUS_BUF0_FULL;
 		reg = TRACECTRL_BUF0_ADDR;
 	} else if (status & STATUS_BUF1_FULL) {
-		clear = STATUS_BUF1_FULL;
 		reg = TRACECTRL_BUF1_ADDR;
 	}
 
-	if (clear) {
-		/* TODO: Allocate more DMA memory suitable for trace buffer
-		 * here, and add it to a linked list. */
-
-		/* lock */
-		/* TODO: Swap the buffer pointer here */
-		(void)reg;
-		tracectrl_reg_write(clear, ctrl, TRACECTRL_STATUS);
-		/* unlock */
+	if (reg) {
+		buf = tracectrl_dma_buf_alloc(ctrl, GFP_ATOMIC);
+		if (!buf) {
+			printk(KERN_ERR "tracectrl irq failed to alloc\n");
+			config = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
+			config &= ~CONFIG_IRQEN;
+			tracectrl_reg_write(config, ctrl, TRACECTRL_CONFIG);
+		} else {
+			tracectrl_update_buf(ctrl, reg, buf->handle,
+					     ctrl->dma_size - 1, true);
+			addr = buf->handle;
+		}
 	}
-
-	printk(KERN_INFO "tracectrl interrupt %u\n", status);
+	printk(KERN_INFO "tracectrl irq %u  %#x %lu\n",
+	       status, (u32) addr, ctrl->used_dma_bufs);
 
 	return IRQ_HANDLED;
 }
@@ -427,7 +482,6 @@ static int tracectrl_probe(struct platform_device *pdev)
 		return res;
 	}
 
-
 	spin_lock_init(&ctrl->lock);
 
 	res = sysfs_create_group(&pdev->dev.kobj, &tracectrl_attr_group);
@@ -468,33 +522,14 @@ static int tracectrl_probe(struct platform_device *pdev)
 	if (res)
 		goto out_minor_remove;
 
-	/* TODO: Allocate buffer on user request, i.e., not here ... */
 	ctrl->dma_size = SZ_64K;
-	/* TODO: Use dma_pool_create so we satisfy hw alignment requirement. */
-	ctrl->dma_buf0 = dma_alloc_coherent(&ctrl->dev, ctrl->dma_size,
-					    &ctrl->dma_handle0, GFP_KERNEL);
-	if (!ctrl->dma_buf0) {
-		res = -ENOMEM;
+	ctrl->dma_pool = dma_pool_create(dev_name(&ctrl->dev), &ctrl->dev,
+					 ctrl->dma_size, ctrl->dma_size, 0);
+	if (!ctrl->dma_pool)
 		goto out_device_destroy;
-	}
-	ctrl->dma_buf1 = dma_alloc_coherent(&ctrl->dev, ctrl->dma_size,
-					    &ctrl->dma_handle1, GFP_KERNEL);
-	if (!ctrl->dma_buf1) {
-		res = -ENOMEM;
-		goto out_free_dma_buf0;
-	}
-
-	/* TODO: 64 bit write ... */
-	tracectrl_update_buf(ctrl, TRACECTRL_BUF0_ADDR, ctrl->dma_handle0,
-			     ctrl->dma_size - 1, true);
-	tracectrl_update_buf(ctrl, TRACECTRL_BUF1_ADDR, ctrl->dma_handle1,
-			     ctrl->dma_size - 1, true);
 
 	return 0;
 
-out_free_dma_buf0:
-	dma_free_coherent(&ctrl->dev, ctrl->dma_size, ctrl->dma_buf0,
-			  ctrl->dma_handle0);
 out_device_destroy:
 	device_destroy(&tracectrl_class, devt);
 out_minor_remove:
@@ -519,10 +554,8 @@ static int tracectrl_remove(struct platform_device *pdev)
 	/* Disable tracing */
 	tracectrl_reg_write(0, ctrl, TRACECTRL_CONFIG);
 
-	dma_free_coherent(&ctrl->dev, ctrl->dma_size, ctrl->dma_buf0,
-			  ctrl->dma_handle0);
-	dma_free_coherent(&ctrl->dev, ctrl->dma_size, ctrl->dma_buf1,
-			  ctrl->dma_handle1);
+	tracectrl_free_all_dma_bufs(ctrl);
+	dma_pool_destroy(ctrl->dma_pool);
 
 	return 0;
 }
