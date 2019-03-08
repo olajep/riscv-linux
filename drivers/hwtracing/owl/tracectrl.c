@@ -193,6 +193,33 @@ static int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
 	return 0;
 }
 
+/**
+ * tracectrl_update_buf - Update buffer pointer in control regs
+ * @ctrl:	tracectrl device
+ * @base:	base address for buffer in control regs
+ * @addr:	buffer pointer
+ * @mask:	buffer mask (buffer size - 1)
+ * @clear_full:	clear the full flag
+ *
+ * NB: Lock should be held when calling this function
+ *
+ * Return: void
+ */
+static void tracectrl_update_buf(struct tracectrl *ctrl, unsigned long base,
+				 u64 addr, u64 mask, bool clear_full)
+{
+	u32 flag;
+	tracectrl_reg_write((u32) (addr >>  0) & 0xffffffff, ctrl, base);
+	tracectrl_reg_write((u32) (addr >> 32) & 0xffffffff, ctrl, base + 4);
+	tracectrl_reg_write(mask, ctrl, base + 8);
+	tracectrl_reg_write(0, ctrl, base + 0xc);
+	if (clear_full) {
+		flag = (base == TRACECTRL_BUF0_ADDR) ?
+			STATUS_BUF0_FULL : STATUS_BUF1_FULL,
+		tracectrl_reg_write(flag, ctrl, TRACECTRL_STATUS);
+	}
+}
+
 static int ioctl_enable(struct tracectrl *ctrl,
 			union ioctl_arg __always_unused *arg)
 {
@@ -451,18 +478,10 @@ static int tracectrl_probe(struct platform_device *pdev)
 	}
 
 	/* TODO: 64 bit write ... */
-	tracectrl_reg_write((u32) ctrl->dma_handle0 & 0xffffffff,
-			    ctrl, TRACECTRL_BUF0_ADDR);
-	tracectrl_reg_write((u32) ((long) ctrl->dma_handle0 >> 32) & 0xffffffff,
-			    ctrl, TRACECTRL_BUF0_ADDR + 4);
-	tracectrl_reg_write(ctrl->dma_size - 1, ctrl, TRACECTRL_BUF0_MASK);
-	tracectrl_reg_write(0, ctrl, TRACECTRL_BUF0_MASK + 4);
-	tracectrl_reg_write((u32) ctrl->dma_handle1 & 0xffffffff,
-			    ctrl, TRACECTRL_BUF1_ADDR);
-	tracectrl_reg_write((u32) ((long) ctrl->dma_handle1 >> 32) & 0xffffffff,
-			    ctrl, TRACECTRL_BUF1_ADDR + 4);
-	tracectrl_reg_write(ctrl->dma_size - 1, ctrl, TRACECTRL_BUF1_MASK);
-	tracectrl_reg_write(0, ctrl, TRACECTRL_BUF1_MASK + 4);
+	tracectrl_update_buf(ctrl, TRACECTRL_BUF0_ADDR, ctrl->dma_handle0,
+			     ctrl->dma_size - 1, true);
+	tracectrl_update_buf(ctrl, TRACECTRL_BUF1_ADDR, ctrl->dma_handle1,
+			     ctrl->dma_size - 1, true);
 
 	return 0;
 
