@@ -31,12 +31,19 @@
 
 #define DRV_NAME "riscv-tracectrl"
 
+/* Register offsets */
 #define TRACECTRL_CONFIG	0x00 /* config register */
 #define TRACECTRL_STATUS	0x04 /* status register */
 #define TRACECTRL_BUF0_ADDR	0x10 /* base address of trace buffer 0 */
 #define TRACECTRL_BUF0_MASK	0x18 /* mask size of trace buffer 0 */
 #define TRACECTRL_BUF1_ADDR	0x20 /* base address of trace buffer 1 */
 #define TRACECTRL_BUF1_MASK	0x28 /* mask size of trace buffer 1 */
+
+/* Register bits */
+#define CONFIG_ENABLE		1
+#define CONFIG_IRQEN		2
+#define STATUS_BUF0_FULL	1
+#define STATUS_BUF1_FULL	2
 
 #define MAX_DEVICES 1 /* TODO: (num_possible_cpus()) */
 
@@ -144,7 +151,7 @@ int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 	struct owl_status *status = &arg->status;
 
 	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
-	status->enabled = val & 1;
+	status->enabled = val & CONFIG_ENABLE;
 
 	/* TODO: Rework */
 	status->tracebuf_size = 2 * ctrl->dma_size;
@@ -192,7 +199,7 @@ int ioctl_enable(struct tracectrl *ctrl, union ioctl_arg __always_unused *arg)
 
 	/* lock */
 	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
-	val |= 3; /* enable | irq_en */
+	val |= CONFIG_ENABLE | CONFIG_IRQEN;
 	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
 	/* unlock */
 
@@ -205,7 +212,7 @@ int ioctl_disable(struct tracectrl *ctrl, union ioctl_arg __always_unused *arg)
 
 	/* lock */
 	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
-	val &= ~1;
+	val &= ~(CONFIG_ENABLE | CONFIG_IRQEN);
 	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
 	/* unlock */
 
@@ -310,7 +317,7 @@ static const struct file_operations tracectrl_fops = {
 static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 {
 	struct tracectrl *ctrl = dev_id;
-	u32 status;
+	u32 status, clear = 0;
 	unsigned long reg;
 
 	/* The RISC-V PLIC does not support?!? edge triggered interrupts (at
@@ -322,22 +329,22 @@ static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 	status = tracectrl_reg_read(ctrl, TRACECTRL_STATUS);
 	/* unlock */
 
-	if (status & 1 /* buf0_full */) {
-		status = 1;
+	if (status & STATUS_BUF0_FULL) {
+		clear = STATUS_BUF0_FULL;
 		reg = TRACECTRL_BUF0_ADDR;
-	} else if (status & 2 /* buf1_full */) {
-		status = 2;
+	} else if (status & STATUS_BUF1_FULL) {
+		clear = STATUS_BUF1_FULL;
 		reg = TRACECTRL_BUF1_ADDR;
 	}
 
-	if (status & 3) {
+	if (clear) {
 		/* TODO: Allocate more DMA memory suitable for trace buffer
 		 * here, and add it to a linked list. */
 
 		/* lock */
 		/* TODO: Swap the buffer pointer here */
 		(void)reg;
-		tracectrl_reg_write(status, ctrl, TRACECTRL_STATUS);
+		tracectrl_reg_write(clear, ctrl, TRACECTRL_STATUS);
 		/* unlock */
 	}
 
