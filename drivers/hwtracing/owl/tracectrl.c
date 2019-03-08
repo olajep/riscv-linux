@@ -52,6 +52,7 @@ static struct class tracectrl_class;
 static DEFINE_IDA(tracectrl_ida);
 
 struct tracectrl {
+	bool enabled;
 	void __iomem *base_addr;
 	spinlock_t lock;
 	size_t dma_size;
@@ -147,11 +148,11 @@ union ioctl_arg {
 
 static int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
-	u32 val;
 	struct owl_status *status = &arg->status;
 
-	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
-	status->enabled = val & CONFIG_ENABLE;
+	/* lock */
+	status->enabled = ctrl->enabled;
+	/* unlock */
 
 	/* TODO: Rework */
 	status->tracebuf_size = 2 * ctrl->dma_size;
@@ -226,6 +227,12 @@ static int ioctl_enable(struct tracectrl *ctrl,
 	u32 val;
 
 	/* lock */
+	if (ctrl->enabled) {
+		/* unlock */
+		return 0; /* Idempotent. Or is -EBUSY better? */
+	}
+
+	ctrl->enabled = true;
 	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
 	val |= CONFIG_ENABLE | CONFIG_IRQEN;
 	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
@@ -240,6 +247,7 @@ static int ioctl_disable(struct tracectrl *ctrl,
 	u32 val;
 
 	/* lock */
+	ctrl->enabled = false;
 	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
 	val &= ~(CONFIG_ENABLE | CONFIG_IRQEN);
 	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
@@ -250,16 +258,15 @@ static int ioctl_disable(struct tracectrl *ctrl,
 
 static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
-	u32 reg;
 	size_t tracebuf_size;
 	struct owl_trace_header *header = &arg->trace_header;
 
 	/* lock */
-	reg = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
-	/* unlock */
-
-	if (reg & 1) /* enabled */
+	if (ctrl->enabled) {
+		/* unlock */
 		return -EBUSY;
+	}
+	/* unlock */
 
 	/* TODO: Rework */
 	header->trace_format = ctrl->trace_format;
