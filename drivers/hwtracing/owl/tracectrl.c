@@ -171,7 +171,7 @@ static int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
 	default:
 		return -EINVAL;
 	}
-	ctrl->trace_format = config->metadata_format;
+	ctrl->trace_format = config->trace_format;
 
 	switch (config->metadata_format) {
 	case OWL_METADATA_FORMAT_DEFAULT:
