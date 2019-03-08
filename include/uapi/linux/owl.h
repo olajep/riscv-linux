@@ -42,11 +42,47 @@ struct owl_config {
 	};
 };
 
-struct owl_trace_entry_default {
-	unsigned timestamp:20; /* relative timestamp */
-	unsigned syscall:10; /* which syscall */
-	unsigned priv:2; /* user, kernel, supervisor */
-} __packed;
+#define OWL_TRACE_KIND_UECALL		0x0 /* Usermode ecall */
+#define OWL_TRACE_KIND_RETURN		0x1 /* Return from ecall/exception */
+#define OWL_TRACE_KIND_SECALL		0x2 /* Supervisor ecall */
+#define OWL_TRACE_KIND_TIMESTAMP	0x3 /* Full 61-bit timestamp */
+#define OWL_TRACE_KIND_EXCEPTION	0x4 /* Non-ecall exception/interrupt */
+
+struct owl_ecall_trace {
+	unsigned kind:3;
+	unsigned timestamp:18;
+	unsigned regval:11;
+} __attribute__((packed));
+
+struct owl_return_trace {
+	unsigned kind:3;
+	unsigned timestamp:18;
+	unsigned regval:11;
+	unsigned pc:32;
+} __attribute__((packed));
+
+struct owl_exception_trace {
+	unsigned kind:3;
+	unsigned timestamp:18;
+	unsigned cause:8;
+	unsigned :3; /* reserved */
+} __attribute__((packed));
+
+struct owl_timestamp_trace {
+	unsigned kind:3;
+	__u64 timestamp:61;
+} __attribute__((packed));
+
+union owl_trace {
+	struct {
+		unsigned kind:3;
+		unsigned lsb_timestamp:18;
+	} __attribute__((packed));
+	struct owl_ecall_trace ecall;
+	struct owl_return_trace ret;
+	struct owl_exception_trace exception;
+	struct owl_timestamp_trace timestamp;
+} __attribute__((packed));
 
 struct owl_metadata_entry {
 	__u64 str_offset; /* Offset from owl_trace_header->metadata to exec string */

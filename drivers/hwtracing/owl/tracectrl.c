@@ -212,10 +212,6 @@ int ioctl_disable(struct tracectrl *ctrl, union ioctl_arg __always_unused *arg)
 	return 0;
 }
 
-static const size_t owl_trace_sizes[] = {
-	[OWL_TRACE_FORMAT_DEFAULT] = sizeof(struct owl_trace_entry_default),
-};
-
 int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
 	u32 reg;
