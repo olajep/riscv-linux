@@ -145,7 +145,7 @@ union ioctl_arg {
 	struct owl_trace_header	trace_header;
 };
 
-int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
+static int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
 	u32 val;
 	struct owl_status *status = &arg->status;
@@ -160,7 +160,7 @@ int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 	return 0;
 }
 
-int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
+static int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
 	extern int pid_max;
 	struct owl_config *config = &arg->config;
@@ -193,7 +193,8 @@ int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
 	return 0;
 }
 
-int ioctl_enable(struct tracectrl *ctrl, union ioctl_arg __always_unused *arg)
+static int ioctl_enable(struct tracectrl *ctrl,
+			union ioctl_arg __always_unused *arg)
 {
 	u32 val;
 
@@ -206,7 +207,8 @@ int ioctl_enable(struct tracectrl *ctrl, union ioctl_arg __always_unused *arg)
 	return 0;
 }
 
-int ioctl_disable(struct tracectrl *ctrl, union ioctl_arg __always_unused *arg)
+static int ioctl_disable(struct tracectrl *ctrl,
+			 union ioctl_arg __always_unused *arg)
 {
 	u32 val;
 
@@ -219,7 +221,7 @@ int ioctl_disable(struct tracectrl *ctrl, union ioctl_arg __always_unused *arg)
 	return 0;
 }
 
-int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
+static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
 	u32 reg;
 	size_t tracebuf_size;
