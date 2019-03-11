@@ -165,8 +165,8 @@ static int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 	/* unlock */
 
 	/* TODO: Rework */
-	status->tracebuf_size = 2 * ctrl->dma_size;
-	status->metadatabuf_size = 0;
+	status->tracebuf_size = ctrl->dma_size * ctrl->used_dma_bufs;
+	status->metadata_size = 0;
 
 	return 0;
 }
@@ -318,7 +318,7 @@ static int ioctl_disable(struct tracectrl *ctrl,
 
 static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
-	size_t tracebuf_size;
+	size_t i, remaining, n = 0;
 	struct owl_trace_header *header = &arg->trace_header;
 
 	/* lock */
@@ -337,16 +337,16 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 		return 0;
 	}
 
-	/* TODO: Loop over all allocated buffers (and clear them?) */
-	tracebuf_size = min(1 * ctrl->dma_size, (size_t)header->tracebuf_size);
-	header->tracebuf_size = tracebuf_size;
-
-	dma_sync_single_for_cpu(&ctrl->dev, ctrl->dma_bufs[0].handle,
-				min(ctrl->dma_size, (size_t)tracebuf_size),
-				DMA_FROM_DEVICE);
-	if (copy_to_user(header->tracebuf, ctrl->dma_bufs[0].buf,
-				min(ctrl->dma_size, (size_t)tracebuf_size)))
-		return -EFAULT;
+	for (i = 0, remaining = header->max_tracebuf_size;
+	     i < ctrl->used_dma_bufs && remaining;
+	     i++, remaining -= n) {
+		n = min(remaining, ctrl->dma_size);
+		dma_sync_single_for_cpu(&ctrl->dev, ctrl->dma_bufs[i].handle,
+					n, DMA_FROM_DEVICE);
+		if (copy_to_user(header->tracebuf, ctrl->dma_bufs[0].buf, n))
+			return -EFAULT;
+		header->tracebuf_size += n;
+	}
 
 	return 0;
 }
