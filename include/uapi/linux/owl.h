@@ -18,7 +18,7 @@ struct owl_status {
 		__kernel_pid_t cgroup;
 	};
 	__u64 tracebuf_size;
-	__u64 metadatabuf_size;
+	__u64 metadata_size;
 };
 
 enum owl_trace_format {
@@ -95,14 +95,14 @@ struct owl_trace_header {
 	/* Filled in by user */
 	void __user *tracebuf;		/* Buffer for traces */
 	void __user *metadatabuf;	/* Buffer for meta data */
-	__u64 tracebuf_size;
-	__u64 metadatabuf_size;
+	__u64 max_tracebuf_size;
+	__u64 max_metadata_size;
 
 	/* Filled in by kernel */
 	enum owl_trace_format trace_format;
 	enum owl_metadata_format metadata_format;
-	__u64 trace_entries;	/* Number of trace entries */
-	__u64 metadata_entries;	/* Number of kernel meta data entries */
+	__u64 tracebuf_size;	/* Size of trace buffer */
+	__u64 metadata_size;	/* Size of metadata */
 };
 
 #define OWL_IOCTL_BASE			'o'
