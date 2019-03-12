@@ -10,6 +10,7 @@ config OWL
 if OWL
 config OWL_TRACECTRL
 	depends on OF
+	select PREEMPT_NOTIFIERS
 	tristate "OWL TraceCtrl driver"
 	help
 	  This enables support for the OWL trace controller driver.

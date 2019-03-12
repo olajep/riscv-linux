@@ -26,6 +26,11 @@
 #include <linux/dmapool.h>
 #include <linux/idr.h>
 #include <linux/cdev.h>
+#include <linux/preempt.h>
+#ifdef __riscv
+/* HACK: See get_timestamp() */
+#include <asm/csr.h>
+#endif
 #include <uapi/linux/owl.h>
 
 #include <linux/uaccess.h>
@@ -73,6 +78,8 @@ struct tracectrl {
 
 	enum owl_trace_format trace_format;
 	enum owl_metadata_format metadata_format;
+
+	struct preempt_notifier preempt_notifier;
 
 	/* Not implemented */
 	pid_t filter_dsid;
@@ -293,6 +300,9 @@ static int ioctl_enable(struct tracectrl *ctrl,
 			     ctrl->dma_size - 1, true);
 
 	ctrl->enabled = true;
+	preempt_notifier_inc();
+	preempt_notifier_all_register(&ctrl->preempt_notifier);
+
 	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
 	val |= CONFIG_ENABLE | CONFIG_IRQEN;
 	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
@@ -305,6 +315,12 @@ static int ioctl_disable(struct tracectrl *ctrl,
 			 union ioctl_arg __always_unused *arg)
 {
 	u32 val;
+
+	if (!ctrl->enabled)
+		return 0;
+
+	preempt_notifier_unregister(&ctrl->preempt_notifier);
+	preempt_notifier_dec();
 
 	/* lock */
 	ctrl->enabled = false;
@@ -403,6 +419,40 @@ static const struct file_operations tracectrl_fops = {
 	.open		= tracectrl_open,
 };
 
+/* HACK: We should use perf_event_read_value() for portability !?!? */
+static u64 get_timestamp(void)
+{
+#ifdef __riscv /* && 64bit */
+	/* We can't use rdtime since it is not implemented in RocketCore.
+	 * Instead it is emulated in bbl. But that triggers an invalid
+	 * instruction exception that would distort the trace. */
+	return csr_read(cycle);
+#else
+	return 0;
+#endif
+}
+
+static void tracectrl_sched_in(struct preempt_notifier *notifier, int cpu)
+{
+	/* kernel/sched/core.c:__fire_sched_in_preempt_notifiers() does not
+	 * NULL check ops in struct preempt_ops. */
+}
+
+static void tracectrl_sched_out(struct preempt_notifier *notifier,
+				struct task_struct *next)
+{
+	struct tracectrl *ctrl =
+		container_of(notifier, struct tracectrl, preempt_notifier);
+
+	if (!ctrl->enabled || current->flags & PF_KTHREAD)
+		return;
+
+	printk(KERN_INFO "tracectrl: sched_out @%lu\t%s/%d to %s/%d\n",
+	       (unsigned long) get_timestamp(),
+	       current->comm, current->pid, next->comm, next->pid);
+}
+
+static __read_mostly struct preempt_ops tracectrl_preempt_ops;
 
 /* TODO: Redo / implement locking */
 static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
@@ -527,6 +577,10 @@ static int tracectrl_probe(struct platform_device *pdev)
 					 ctrl->dma_size, ctrl->dma_size, 0);
 	if (!ctrl->dma_pool)
 		goto out_device_destroy;
+
+	tracectrl_preempt_ops.sched_in = tracectrl_sched_in;
+	tracectrl_preempt_ops.sched_out = tracectrl_sched_out;
+	preempt_notifier_init(&ctrl->preempt_notifier, &tracectrl_preempt_ops);
 
 	return 0;
 
