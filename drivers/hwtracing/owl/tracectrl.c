@@ -336,6 +336,7 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
 	size_t i, remaining, n = 0;
 	struct owl_trace_header *header = &arg->trace_header;
+	u8 __user *p;
 
 	/* lock */
 	if (ctrl->enabled) {
@@ -353,15 +354,18 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 		return 0;
 	}
 
+	/* Copy trace buffer */
+	p = header->tracebuf;
 	for (i = 0, remaining = header->max_tracebuf_size;
 	     i < ctrl->used_dma_bufs && remaining;
 	     i++, remaining -= n) {
 		n = min(remaining, ctrl->dma_size);
 		dma_sync_single_for_cpu(&ctrl->dev, ctrl->dma_bufs[i].handle,
 					n, DMA_FROM_DEVICE);
-		if (copy_to_user(header->tracebuf, ctrl->dma_bufs[0].buf, n))
+		if (copy_to_user(p, ctrl->dma_bufs[0].buf, n))
 			return -EFAULT;
 		header->tracebuf_size += n;
+		p += n;
 	}
 
 	return 0;
