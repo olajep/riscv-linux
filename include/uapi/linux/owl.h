@@ -84,12 +84,14 @@ union owl_trace {
 	struct owl_timestamp_trace timestamp;
 } __attribute__((packed));
 
+#define OWL_TASK_COMM_LEN 16
 struct owl_metadata_entry {
-	__u64 str_offset; /* Offset from owl_trace_header->metadata to exec string */
-	unsigned timestamp:20; /* When process was scheduled in */
-	/* Map ??? */
-	/* __u64 text_offset //  ???: If we wan't the user space callsite */
-};
+	__u64		timestamp; /* use relative to save space */
+	__u8		cpu; /* 256 cpus should be enough for now */
+	__u64		:56; /* pad */
+	/* TODO: 1. Use hashtable with exe inode. Will be lots of duplicates */
+	char		comm[OWL_TASK_COMM_LEN];
+} __attribute__((packed));
 
 struct owl_trace_header {
 	/* Filled in by user */
