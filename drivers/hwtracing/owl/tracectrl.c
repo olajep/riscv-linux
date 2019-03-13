@@ -76,6 +76,13 @@ struct tracectrl {
 	struct tracectrl_dma_buf dma_bufs[1024];
 	size_t used_dma_bufs;
 
+	/* TODO: Optimize this. In many cases we the scheduler will do task A
+	 * --> kthread-> task A. So if we keep track of the previously
+	 * scheduled user task (by pid?), we don't need to insert
+	 * duplicates. */
+	struct owl_metadata_entry metadata[1024];
+	size_t used_metadata_entries;
+
 	enum owl_trace_format trace_format;
 	enum owl_metadata_format metadata_format;
 
@@ -173,7 +180,8 @@ static int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 
 	/* TODO: Rework */
 	status->tracebuf_size = ctrl->dma_size * ctrl->used_dma_bufs;
-	status->metadata_size = 0;
+	status->metadata_size =
+		ctrl->used_metadata_entries * sizeof(struct owl_metadata_entry);
 
 	return 0;
 }
@@ -299,6 +307,8 @@ static int ioctl_enable(struct tracectrl *ctrl,
 	tracectrl_update_buf(ctrl, TRACECTRL_BUF1_ADDR, buf1->handle,
 			     ctrl->dma_size - 1, true);
 
+	ctrl->used_metadata_entries = 0;
+
 	ctrl->enabled = true;
 	preempt_notifier_inc();
 	preempt_notifier_all_register(&ctrl->preempt_notifier);
@@ -367,6 +377,14 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 		header->tracebuf_size += n;
 		p += n;
 	}
+
+	/* Copy metadata */
+	n = min_t(u64, header->max_metadata_size,
+		  ctrl->used_metadata_entries *
+			sizeof(struct owl_metadata_entry));
+	if (copy_to_user(header->metadatabuf, ctrl->metadata, n))
+		return -EFAULT;
+	header->metadata_size = n;
 
 	return 0;
 }
@@ -442,6 +460,21 @@ static void tracectrl_sched_in(struct preempt_notifier *notifier, int cpu)
 	 * NULL check ops in struct preempt_ops. */
 }
 
+static void tracectrl_insert_metadata(struct tracectrl *ctrl,
+				      struct task_struct *task)
+{
+	struct owl_metadata_entry *entry;
+	if (ctrl->used_metadata_entries >= ARRAY_SIZE(ctrl->metadata))
+		return;
+
+	entry = &ctrl->metadata[ctrl->used_metadata_entries];
+	entry->timestamp = get_timestamp();
+	entry->cpu = (u8) smp_processor_id();
+	memcpy(entry->comm, task->comm, TASK_COMM_LEN);
+
+	ctrl->used_metadata_entries++;
+}
+
 static void tracectrl_sched_out(struct preempt_notifier *notifier,
 				struct task_struct *next)
 {
@@ -451,9 +484,7 @@ static void tracectrl_sched_out(struct preempt_notifier *notifier,
 	if (!ctrl->enabled || current->flags & PF_KTHREAD)
 		return;
 
-	printk(KERN_INFO "tracectrl: sched_out @%lu\t%s/%d to %s/%d\n",
-	       (unsigned long) get_timestamp(),
-	       current->comm, current->pid, next->comm, next->pid);
+	tracectrl_insert_metadata(ctrl, current);
 }
 
 static __read_mostly struct preempt_ops tracectrl_preempt_ops;
