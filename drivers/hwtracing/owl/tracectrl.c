@@ -372,7 +372,7 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 		n = min(remaining, ctrl->dma_size);
 		dma_sync_single_for_cpu(&ctrl->dev, ctrl->dma_bufs[i].handle,
 					n, DMA_FROM_DEVICE);
-		if (copy_to_user(p, ctrl->dma_bufs[0].buf, n))
+		if (copy_to_user(p, ctrl->dma_bufs[i].buf, n))
 			return -EFAULT;
 		header->tracebuf_size += n;
 		p += n;
