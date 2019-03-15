@@ -762,3 +762,6 @@ config GUP_BENCHMARK
 
 config ARCH_HAS_PTE_SPECIAL
 	bool
+
+config MMAP_NOTIFIERS
+	bool

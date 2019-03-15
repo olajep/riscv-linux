@@ -34,6 +34,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/mmdebug.h>
 #include <linux/perf_event.h>
+#include <linux/mmap_notifier.h>
 #include <linux/audit.h>
 #include <linux/khugepaged.h>
 #include <linux/uprobes.h>
@@ -1658,6 +1659,71 @@ int vma_wants_writenotify(struct vm_area_struct *vma, pgprot_t vm_page_prot)
 		mapping_cap_account_dirty(vma->vm_file->f_mapping);
 }
 
+#ifdef CONFIG_MMAP_NOTIFIERS
+
+static DEFINE_STATIC_KEY_FALSE(mmap_notifier_key);
+static HLIST_HEAD(mmap_notifiers);
+/**
+ * mmap_notifier_register - tell me about mmap events.
+ * TODO: LOCKING!?!?
+ * @notifier: notifier struct to register
+ */
+void mmap_notifier_register(struct mmap_notifier *notifier)
+{
+	if (!static_branch_unlikely(&mmap_notifier_key))
+		WARN(1, "registering mmap_notifier while notifiers disabled\n");
+
+	hlist_add_head(&notifier->link, &mmap_notifiers);
+}
+EXPORT_SYMBOL_GPL(mmap_notifier_register);
+
+/**
+ * mmap_notifier_unregister - no longer interested in mmap notifications
+ * TODO: LOCKING!?!?
+ * @notifier: notifier struct to unregister
+ *
+ * This is *not* safe to call from within a mmap notifier.
+ */
+void mmap_notifier_unregister(struct mmap_notifier *notifier)
+{
+	hlist_del(&notifier->link);
+}
+EXPORT_SYMBOL_GPL(mmap_notifier_unregister);
+
+void mmap_notifier_inc(void)
+{
+	static_branch_inc(&mmap_notifier_key);
+}
+EXPORT_SYMBOL_GPL(mmap_notifier_inc);
+
+void mmap_notifier_dec(void)
+{
+	static_branch_dec(&mmap_notifier_key);
+}
+EXPORT_SYMBOL_GPL(mmap_notifier_dec);
+
+static __always_inline void __fire_mmap_notifiers(struct vm_area_struct *vma)
+{
+	struct mmap_notifier *notifier;
+
+	hlist_for_each_entry(notifier, &mmap_notifiers, link)
+		notifier->ops->mmap(notifier, vma);
+}
+
+static inline void fire_mmap_event_notifiers(struct vm_area_struct *vma)
+{
+	if (static_branch_unlikely(&mmap_notifier_key))
+		__fire_mmap_notifiers(vma);
+}
+
+#else /* !CONFIG_MMAP_NOTIFIERS */
+
+static inline void fire_mmap_event_notifiers(struct vm_area_struct *vma)
+{
+}
+
+#endif /* CONFIG_MMAP_NOTIFIERS */
+
 /*
  * We account for memory if it's a private writeable mapping,
  * not hugepages and VM_NORESERVE wasn't set.
@@ -1793,6 +1859,7 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 	file = vma->vm_file;
 out:
 	perf_event_mmap(vma);
+	fire_mmap_event_notifiers(vma);
 
 	vm_stat_account(mm, vm_flags, len >> PAGE_SHIFT);
 	if (vm_flags & VM_LOCKED) {
@@ -2372,6 +2439,7 @@ int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 				spin_unlock(&mm->page_table_lock);
 
 				perf_event_mmap(vma);
+				fire_mmap_event_notifiers(vma);
 			}
 		}
 	}
@@ -2451,6 +2519,7 @@ int expand_downwards(struct vm_area_struct *vma,
 				spin_unlock(&mm->page_table_lock);
 
 				perf_event_mmap(vma);
+				fire_mmap_event_notifiers(vma);
 			}
 		}
 	}
@@ -2994,6 +3063,7 @@ static int do_brk_flags(unsigned long addr, unsigned long len, unsigned long fla
 	vma_link(mm, vma, prev, rb_link, rb_parent);
 out:
 	perf_event_mmap(vma);
+	fire_mmap_event_notifiers(vma);
 	mm->total_vm += len >> PAGE_SHIFT;
 	mm->data_vm += len >> PAGE_SHIFT;
 	if (flags & VM_LOCKED)
@@ -3362,6 +3432,7 @@ static struct vm_area_struct *__install_special_mapping(
 	vm_stat_account(mm, vma->vm_flags, len >> PAGE_SHIFT);
 
 	perf_event_mmap(vma);
+	fire_mmap_event_notifiers(vma);
 
 	return vma;
 
