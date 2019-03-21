@@ -470,6 +470,7 @@ static void tracectrl_insert_metadata(struct tracectrl *ctrl,
 	entry = &ctrl->metadata[ctrl->used_metadata_entries];
 	entry->timestamp = get_timestamp();
 	entry->cpu = (u8) smp_processor_id();
+	entry->pid = (int) task->pid;
 	memcpy(entry->comm, task->comm, TASK_COMM_LEN);
 
 	ctrl->used_metadata_entries++;

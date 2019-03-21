@@ -88,7 +88,8 @@ union owl_trace {
 struct owl_metadata_entry {
 	__u64		timestamp; /* use relative to save space */
 	__u8		cpu; /* 256 cpus should be enough for now */
-	__u64		:56; /* pad */
+	unsigned	:24; /* pad */
+	int		pid;
 	/* TODO: 1. Use hashtable with exe inode. Will be lots of duplicates */
 	char		comm[OWL_TASK_COMM_LEN];
 } __attribute__((packed));
