@@ -187,6 +187,8 @@ static int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 	status->tracebuf_size = ctrl->dma_size * ctrl->used_dma_bufs;
 	status->metadata_size =
 		ctrl->used_metadata_entries * sizeof(struct owl_metadata_entry);
+	status->map_info_size =
+		ctrl->used_map_entries * sizeof(struct owl_map_info);
 
 	return 0;
 }

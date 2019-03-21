@@ -19,6 +19,7 @@ struct owl_status {
 	};
 	__u64 tracebuf_size;
 	__u64 metadata_size;
+	__u64 map_info_size;
 };
 
 enum owl_trace_format {
