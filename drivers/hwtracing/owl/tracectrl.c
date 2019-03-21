@@ -27,6 +27,7 @@
 #include <linux/idr.h>
 #include <linux/cdev.h>
 #include <linux/preempt.h>
+#include <linux/mmap_notifier.h>
 #ifdef __riscv
 /* HACK: See get_timestamp() */
 #include <asm/csr.h>
@@ -83,10 +84,14 @@ struct tracectrl {
 	struct owl_metadata_entry metadata[1024];
 	size_t used_metadata_entries;
 
+	struct owl_map_info maps[1024];
+	size_t used_map_entries;
+
 	enum owl_trace_format trace_format;
 	enum owl_metadata_format metadata_format;
 
 	struct preempt_notifier preempt_notifier;
+	struct mmap_notifier mmap_notifier;
 
 	/* Not implemented */
 	pid_t filter_dsid;
@@ -308,6 +313,7 @@ static int ioctl_enable(struct tracectrl *ctrl,
 			     ctrl->dma_size - 1, true);
 
 	ctrl->used_metadata_entries = 0;
+	ctrl->used_map_entries = 0;
 
 	ctrl->enabled = true;
 	preempt_notifier_inc();
@@ -385,6 +391,13 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 	if (copy_to_user(header->metadatabuf, ctrl->metadata, n))
 		return -EFAULT;
 	header->metadata_size = n;
+
+	/* Copy metadata */
+	n = min_t(u64, header->max_map_info_size,
+		  ctrl->used_map_entries * sizeof(struct owl_map_info));
+	if (copy_to_user(header->mapinfobuf, ctrl->maps, n))
+		return -EFAULT;
+	header->map_info_size = n;
 
 	return 0;
 }
@@ -489,6 +502,79 @@ static void tracectrl_sched_out(struct preempt_notifier *notifier,
 }
 
 static __read_mostly struct preempt_ops tracectrl_preempt_ops;
+
+static void tracectrl_insert_map(struct tracectrl *ctrl,
+				 struct vm_area_struct *vma,
+				 struct task_struct *task)
+{
+	struct owl_map_info *entry;
+	char *path, *buf;
+	size_t path_len;
+
+	if (!(vma->vm_flags & VM_EXEC))
+		return;
+
+	if (!current) {
+		printk(KERN_INFO "tracectrl_mmap_event: no current task\n");
+		return;
+	}
+
+	if (ctrl->used_map_entries >= ARRAY_SIZE(ctrl->maps))
+		return;
+
+#if 0
+	if (vma->vm_file) /* We'll save some space but is it worth it?!? */
+		return;
+#endif
+
+	entry = &ctrl->maps[ctrl->used_map_entries];
+	entry->pid	= task->pid;
+	entry->vm_start	= (u64) vma->vm_start;
+	entry->vm_end	= (u64) vma->vm_end;
+
+	if (vma->vm_file) {
+		path = file_path(vma->vm_file, entry->path,
+				 ARRAY_SIZE(entry->path));
+		if (!IS_ERR(path))
+			goto got_path;
+
+		buf = kmalloc(PATH_MAX, GFP_KERNEL);
+		if (!buf) {
+			memcpy(entry->path, "//enomem", sizeof("//enomem"));
+			goto got_path;
+		}
+		path = file_path(vma->vm_file, buf, ARRAY_SIZE(entry->path));
+		if (IS_ERR(path)) {
+			memcpy(entry->path, "//toolong", sizeof("//toolong"));
+			kfree(buf);
+			goto got_path;
+		}
+		path_len = strlen(path);
+		strlcpy(entry->path,
+			&buf[path_len - min(ARRAY_SIZE(entry->path), path_len)],
+			ARRAY_SIZE(entry->path));
+		kfree(buf);
+	} else {
+		/* TODO: else "[heap]" "[stack]" ...
+		 * See kernel/events/core:perf_event_mmap_event() */
+		memcpy(entry->path, "//nofile", sizeof("//nofile"));
+	}
+got_path:
+
+	ctrl->used_map_entries++;
+}
+
+
+static void tracectrl_mmap_event(struct mmap_notifier *notifier,
+				 struct vm_area_struct *vma)
+{
+	struct tracectrl *ctrl =
+		container_of(notifier, struct tracectrl, mmap_notifier);
+
+	tracectrl_insert_map(ctrl, vma, current);
+}
+
+static __read_mostly struct mmap_notifier_ops tracectrl_mmap_notifier_ops;
 
 /* TODO: Redo / implement locking */
 static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
@@ -617,6 +703,8 @@ static int tracectrl_probe(struct platform_device *pdev)
 	tracectrl_preempt_ops.sched_in = tracectrl_sched_in;
 	tracectrl_preempt_ops.sched_out = tracectrl_sched_out;
 	preempt_notifier_init(&ctrl->preempt_notifier, &tracectrl_preempt_ops);
+	tracectrl_mmap_notifier_ops.mmap = tracectrl_mmap_event;
+	mmap_notifier_init(&ctrl->mmap_notifier, &tracectrl_mmap_notifier_ops);
 
 	return 0;
 

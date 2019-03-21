@@ -94,18 +94,28 @@ struct owl_metadata_entry {
 	char		comm[OWL_TASK_COMM_LEN];
 } __attribute__((packed));
 
+struct owl_map_info {
+	char path[128]; /* TODO: Convert to offset into string table */
+	__u32 pid;
+	__u64 vm_start;
+	__u64 vm_end;
+} __attribute__((packed));
+
 struct owl_trace_header {
 	/* Filled in by user */
 	void __user *tracebuf;		/* Buffer for traces */
 	void __user *metadatabuf;	/* Buffer for meta data */
+	void __user *mapinfobuf;	/* Buffer for map info */
 	__u64 max_tracebuf_size;
 	__u64 max_metadata_size;
+	__u64 max_map_info_size;
 
 	/* Filled in by kernel */
 	enum owl_trace_format trace_format;
 	enum owl_metadata_format metadata_format;
 	__u64 tracebuf_size;	/* Size of trace buffer */
 	__u64 metadata_size;	/* Size of metadata */
+	__u64 map_info_size;	/* Size of mapping info */
 };
 
 #define OWL_IOCTL_BASE			'o'
