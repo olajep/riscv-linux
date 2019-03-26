@@ -95,9 +95,10 @@ struct owl_metadata_entry {
 	char		comm[OWL_TASK_COMM_LEN];
 } __attribute__((packed));
 
+#define OWL_PATH_MAX 128
 struct owl_map_info {
-	char path[128]; /* TODO: Convert to offset into string table */
-	__u32 pid;
+	char path[OWL_PATH_MAX]; /* TODO: Convert to offset into string table */
+	int pid;
 	__u64 vm_start;
 	__u64 vm_end;
 } __attribute__((packed));
