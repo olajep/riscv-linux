@@ -28,6 +28,8 @@
 #include <linux/cdev.h>
 #include <linux/preempt.h>
 #include <linux/mmap_notifier.h>
+#include <linux/sched/task.h>
+#include <linux/sched/signal.h>
 #ifdef __riscv
 /* HACK: See get_timestamp() */
 #include <asm/csr.h>
@@ -284,6 +286,8 @@ tracectrl_dma_buf_alloc(struct tracectrl *ctrl, gfp_t gfp_flags)
 	return buf;
 }
 
+void tracectrl_init_map_info(struct tracectrl *ctrl);
+
 /* Redo locking?!? */
 static int ioctl_enable(struct tracectrl *ctrl,
 			union ioctl_arg __always_unused *arg)
@@ -314,14 +318,12 @@ static int ioctl_enable(struct tracectrl *ctrl,
 	tracectrl_update_buf(ctrl, TRACECTRL_BUF1_ADDR, buf1->handle,
 			     ctrl->dma_size - 1, true);
 
+	tracectrl_init_map_info(ctrl);
 	ctrl->used_metadata_entries = 0;
-	ctrl->used_map_entries = 0;
-
-	ctrl->enabled = true;
 	preempt_notifier_inc();
 	preempt_notifier_all_register(&ctrl->preempt_notifier);
-	mmap_notifier_inc();
-	mmap_notifier_register(&ctrl->mmap_notifier);
+
+	ctrl->enabled = true;
 
 	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
 	val |= CONFIG_ENABLE | CONFIG_IRQEN;
@@ -568,6 +570,32 @@ static void tracectrl_insert_map(struct tracectrl *ctrl,
 got_path:
 
 	ctrl->used_map_entries++;
+	if (ctrl->used_map_entries == ARRAY_SIZE(ctrl->maps))
+		printk(KERN_INFO "tracectrl: map info full\n");
+}
+
+void tracectrl_init_map_info(struct tracectrl *ctrl)
+{
+	struct task_struct *p;
+	struct mm_struct *mm;
+	struct vm_area_struct *vma;
+
+	ctrl->used_map_entries = 0;
+
+	read_lock(&tasklist_lock);
+	for_each_process(p) {
+		mm = p->mm;
+		if (p->flags & PF_KTHREAD)
+			continue;
+		down_read(&mm->mmap_sem);
+		for (vma = mm->mmap; vma; vma = vma->vm_next)
+			tracectrl_insert_map(ctrl, vma, p);
+		up_read(&mm->mmap_sem);
+	}
+	read_unlock(&tasklist_lock);
+
+	mmap_notifier_inc();
+	mmap_notifier_register(&ctrl->mmap_notifier);
 }
 
 
