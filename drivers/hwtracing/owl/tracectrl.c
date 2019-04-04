@@ -588,7 +588,7 @@ void tracectrl_init_map_info(struct tracectrl *ctrl)
 	read_lock(&tasklist_lock);
 	for_each_process(p) {
 		mm = p->mm;
-		if (p->flags & PF_KTHREAD)
+		if (!mm || p->flags & PF_KTHREAD)
 			continue;
 		down_read(&mm->mmap_sem);
 		for (vma = mm->mmap; vma; vma = vma->vm_next)
