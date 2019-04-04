@@ -48,6 +48,7 @@ struct owl_config {
 #define OWL_TRACE_KIND_SECALL		0x2 /* Supervisor ecall */
 #define OWL_TRACE_KIND_TIMESTAMP	0x3 /* Full 61-bit timestamp */
 #define OWL_TRACE_KIND_EXCEPTION	0x4 /* Non-ecall exception/interrupt */
+#define OWL_TRACE_KIND_MSBPC		0x5 /* High bits of PC */
 
 struct owl_ecall_trace {
 	unsigned kind:3;
@@ -74,6 +75,15 @@ struct owl_timestamp_trace {
 	__u64 timestamp:61;
 } __attribute__((packed));
 
+struct owl_msbpc_trace {
+	unsigned kind:3;
+	unsigned timestamp:18;
+	unsigned priv:2;
+	unsigned :9 /* reserved */;
+	unsigned msbpc:32; /* Not sign extended */
+} __attribute__((packed));
+
+
 union owl_trace {
 	struct {
 		unsigned kind:3;
@@ -83,6 +93,7 @@ union owl_trace {
 	struct owl_return_trace ret;
 	struct owl_exception_trace exception;
 	struct owl_timestamp_trace timestamp;
+	struct owl_msbpc_trace msbpc;
 } __attribute__((packed));
 
 #define OWL_TASK_COMM_LEN 16
