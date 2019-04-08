@@ -519,8 +519,9 @@ static void tracectrl_insert_map(struct tracectrl *ctrl,
 				 struct task_struct *task)
 {
 	struct owl_map_info *entry;
-	char *path, *buf;
-	size_t path_len;
+	const char *path;
+	char static_buf[ARRAY_SIZE(entry->path)], *buf = NULL;
+	size_t len;
 
 	if (!(vma->vm_flags & VM_EXEC))
 		return;
@@ -544,33 +545,36 @@ static void tracectrl_insert_map(struct tracectrl *ctrl,
 	entry->vm_end	= (u64) vma->vm_end;
 
 	if (vma->vm_file) {
-		path = file_path(vma->vm_file, entry->path,
-				 ARRAY_SIZE(entry->path));
+		path = file_path(vma->vm_file, static_buf,
+				 ARRAY_SIZE(static_buf));
 		if (!IS_ERR(path))
 			goto got_path;
 
 		buf = kmalloc(PATH_MAX, GFP_KERNEL);
 		if (!buf) {
-			memcpy(entry->path, "//enomem", sizeof("//enomem"));
+			path = "//enomem";
 			goto got_path;
 		}
-		path = file_path(vma->vm_file, buf, ARRAY_SIZE(entry->path));
+		path = file_path(vma->vm_file, buf, PATH_MAX);
 		if (IS_ERR(path)) {
-			memcpy(entry->path, "//toolong", sizeof("//toolong"));
-			kfree(buf);
+			path = "//toolong";
 			goto got_path;
+		} else {
+			/* We want the end of the path so we at least get the
+			 * filename */
+			len = strlen(path);
+			path = path + len - min(ARRAY_SIZE(entry->path), len);
 		}
-		path_len = strlen(path);
-		strlcpy(entry->path,
-			&buf[path_len - min(ARRAY_SIZE(entry->path), path_len)],
-			ARRAY_SIZE(entry->path));
-		kfree(buf);
 	} else {
 		/* TODO: else "[heap]" "[stack]" ...
 		 * See kernel/events/core:perf_event_mmap_event() */
-		memcpy(entry->path, "//nofile", sizeof("//nofile"));
+		path = "//nofile";
+		goto got_path;
 	}
 got_path:
+	strlcpy(entry->path, path, ARRAY_SIZE(entry->path));
+	if (buf)
+		kfree(buf);
 
 	ctrl->used_map_entries++;
 	if (ctrl->used_map_entries == ARRAY_SIZE(ctrl->maps))
