@@ -85,6 +85,7 @@ struct owl_pchi_trace {
 
 
 union owl_trace {
+	__u64 val;
 	struct {
 		unsigned kind:3;
 		unsigned lsb_timestamp:18;
