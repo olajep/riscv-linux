@@ -278,7 +278,9 @@ tracectrl_dma_buf_alloc(struct tracectrl *ctrl, gfp_t gfp_flags)
 
 	buf = &ctrl->dma_bufs[ctrl->used_dma_bufs];
 
-	buf->buf = dma_pool_alloc(ctrl->dma_pool, gfp_flags, &buf->handle);
+	/* TODO: Revisit when H/W gets buffer pointer. Then there's no need
+	 * to use zero allocated buffers. */
+	buf->buf = dma_pool_zalloc(ctrl->dma_pool, gfp_flags, &buf->handle);
 
 	if (buf->buf)
 		ctrl->used_dma_bufs++;
