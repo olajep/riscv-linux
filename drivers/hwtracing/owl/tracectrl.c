@@ -325,6 +325,8 @@ static int ioctl_enable(struct tracectrl *ctrl,
 
 	ctrl->enabled = true;
 
+	/* Memory barrier here */
+
 	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
 	val |= CONFIG_ENABLE | CONFIG_IRQEN;
 	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
@@ -341,17 +343,19 @@ static int ioctl_disable(struct tracectrl *ctrl,
 	if (!ctrl->enabled)
 		return 0;
 
-	preempt_notifier_unregister(&ctrl->preempt_notifier);
-	preempt_notifier_dec();
-	mmap_notifier_unregister(&ctrl->mmap_notifier);
-	mmap_notifier_dec();
-
 	/* lock */
 	ctrl->enabled = false;
 	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
 	val &= ~(CONFIG_ENABLE | CONFIG_IRQEN);
 	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
 	/* unlock */
+
+	/* Memory barrier here */
+
+	mmap_notifier_unregister(&ctrl->mmap_notifier);
+	mmap_notifier_dec();
+	preempt_notifier_unregister(&ctrl->preempt_notifier);
+	preempt_notifier_dec();
 
 	return 0;
 }
