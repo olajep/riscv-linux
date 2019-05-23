@@ -103,7 +103,8 @@ struct owl_metadata_entry {
 	__u16		cpu; /* 65536 cpus should be enough for now */
 	unsigned	has_mm:1;
 	unsigned	in_execve:1;
-	__u64		:46; /* pad */
+	unsigned	kthread:1;
+	__u64		:45; /* pad */
 	int		pid;
 	int		ppid;
 	/* TODO: 1. Use hashtable with exe inode. Will be lots of duplicates */

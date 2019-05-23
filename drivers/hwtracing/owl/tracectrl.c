@@ -495,6 +495,7 @@ static void tracectrl_insert_metadata(struct tracectrl *ctrl,
 	entry->ppid = (int) task_ppid_nr(task);
 	entry->has_mm = task->mm != NULL;
 	entry->in_execve = task->in_execve;
+	entry->kthread = !!(task->flags & PF_KTHREAD);
 	memcpy(entry->comm, task->comm, TASK_COMM_LEN);
 
 	ctrl->used_metadata_entries++;
@@ -506,7 +507,7 @@ static void tracectrl_sched_out(struct preempt_notifier *notifier,
 	struct tracectrl *ctrl =
 		container_of(notifier, struct tracectrl, preempt_notifier);
 
-	if (!ctrl->enabled || current->flags & PF_KTHREAD)
+	if (!ctrl->enabled)
 		return;
 
 	tracectrl_insert_metadata(ctrl, current);
