@@ -97,9 +97,9 @@ union owl_trace {
 	struct owl_pchi_trace pchi;
 } __attribute__((packed));
 
+
 #define OWL_TASK_COMM_LEN 16
-struct owl_metadata_entry {
-	__u64		timestamp; /* use relative to save space */
+struct owl_task {
 	__u16		cpu; /* 65536 cpus should be enough for now */
 	unsigned	has_mm:1;
 	unsigned	in_execve:1;
@@ -109,6 +109,11 @@ struct owl_metadata_entry {
 	int		ppid;
 	/* TODO: 1. Use hashtable with exe inode. Will be lots of duplicates */
 	char		comm[OWL_TASK_COMM_LEN];
+} __attribute__((packed));
+
+struct owl_metadata_entry {
+	__u64		timestamp; /* use relative to save space */
+	struct owl_task	task;
 } __attribute__((packed));
 
 #define OWL_PATH_MAX 128

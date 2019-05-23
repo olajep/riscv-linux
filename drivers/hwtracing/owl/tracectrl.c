@@ -488,15 +488,15 @@ static void tracectrl_insert_metadata(struct tracectrl *ctrl,
 	if (ctrl->used_metadata_entries >= ARRAY_SIZE(ctrl->metadata))
 		return;
 
-	entry = &ctrl->metadata[ctrl->used_metadata_entries];
-	entry->timestamp = get_timestamp();
-	entry->cpu = (u16) smp_processor_id();
-	entry->pid = (int) task_pid_nr(task);
-	entry->ppid = (int) task_ppid_nr(task);
-	entry->has_mm = task->mm != NULL;
-	entry->in_execve = task->in_execve;
-	entry->kthread = !!(task->flags & PF_KTHREAD);
-	memcpy(entry->comm, task->comm, TASK_COMM_LEN);
+	entry			= &ctrl->metadata[ctrl->used_metadata_entries];
+	entry->timestamp	= get_timestamp();
+	entry->task.cpu		= (u16) smp_processor_id();
+	entry->task.pid		= (int) task_pid_nr(task);
+	entry->task.ppid	= (int) task_ppid_nr(task);
+	entry->task.has_mm	= task->mm != NULL;
+	entry->task.in_execve	= task->in_execve;
+	entry->task.kthread	= !!(task->flags & PF_KTHREAD);
+	memcpy(entry->task.comm, task->comm, TASK_COMM_LEN);
 
 	ctrl->used_metadata_entries++;
 }
