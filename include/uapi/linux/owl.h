@@ -100,11 +100,6 @@ union owl_trace {
 
 #define OWL_TASK_COMM_LEN 16
 struct owl_task {
-	__u16		cpu; /* 65536 cpus should be enough for now */
-	unsigned	has_mm:1;
-	unsigned	in_execve:1;
-	unsigned	kthread:1;
-	__u64		:45; /* pad */
 	int		pid;
 	int		ppid;
 	/* TODO: 1. Use hashtable with exe inode. Will be lots of duplicates */
@@ -113,6 +108,11 @@ struct owl_task {
 
 struct owl_metadata_entry {
 	__u64		timestamp; /* use relative to save space */
+	__u16		cpu; /* 65536 cpus should be enough for now */
+	unsigned	has_mm:1;
+	unsigned	in_execve:1;
+	unsigned	kthread:1;
+	__u64		:45; /* pad */
 	struct owl_task	task;
 } __attribute__((packed));
 
