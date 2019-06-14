@@ -41,6 +41,7 @@ struct owl_config {
 		__kernel_pid_t ppid;
 		__kernel_pid_t cgroup;
 	};
+	bool ignore_illegal_insn; /* Don't trace illegal instructions */
 };
 
 #define OWL_TRACE_KIND_UECALL		0x0 /* Usermode ecall */

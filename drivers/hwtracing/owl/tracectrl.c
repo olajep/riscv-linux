@@ -49,10 +49,11 @@
 #define TRACECTRL_BUF1_MASK	0x28 /* mask size of trace buffer 1 */
 
 /* Register bits */
-#define CONFIG_ENABLE		1
-#define CONFIG_IRQEN		2
-#define STATUS_BUF0_FULL	1
-#define STATUS_BUF1_FULL	2
+#define CONFIG_ENABLE				1
+#define CONFIG_IRQEN				2
+#define CONFIG_IGNORE_ILLEGAL_INSN		4
+#define STATUS_BUF0_FULL			1
+#define STATUS_BUF1_FULL			2
 
 #define MAX_DEVICES 1 /* TODO: (num_possible_cpus()) */
 
@@ -97,7 +98,9 @@ struct tracectrl {
 
 	/* Not implemented */
 	pid_t filter_dsid;
+
 	u32 clock_divider;
+	bool ignore_illegal_insn;
 };
 
 static inline void tracectrl_reg_write(u32 value, struct tracectrl *ctrl,
@@ -225,6 +228,8 @@ static int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
 
 	ctrl->clock_divider = config->clock_divider ?: 1;
 
+	ctrl->ignore_illegal_insn = config->ignore_illegal_insn;
+
 	return 0;
 }
 
@@ -333,6 +338,10 @@ static int ioctl_enable(struct tracectrl *ctrl,
 
 	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
 	val |= CONFIG_ENABLE | CONFIG_IRQEN;
+	if (ctrl->ignore_illegal_insn)
+		val |= CONFIG_IGNORE_ILLEGAL_INSN;
+	else
+		val &= ~CONFIG_IGNORE_ILLEGAL_INSN;
 	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
 	/* unlock */
 
