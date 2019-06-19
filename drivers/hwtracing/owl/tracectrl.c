@@ -41,19 +41,15 @@
 #define DRV_NAME "riscv-tracectrl"
 
 /* Register offsets */
-#define TRACECTRL_CONFIG	0x00 /* config register */
-#define TRACECTRL_STATUS	0x04 /* status register */
-#define TRACECTRL_BUF0_ADDR	0x10 /* base address of trace buffer 0 */
-#define TRACECTRL_BUF0_MASK	0x18 /* mask size of trace buffer 0 */
-#define TRACECTRL_BUF1_ADDR	0x20 /* base address of trace buffer 1 */
-#define TRACECTRL_BUF1_MASK	0x28 /* mask size of trace buffer 1 */
+#define TRACECTRL_CONFIG	0x000 /* config register */
+#define TRACECTRL_BUF_MASK	0x008 /* mask size of trace buffer 0 */
+#define TRACECTRL_STATUS_BASE	0x100 /* buffer status base */
+#define TRACECTRL_BUF_BASE	0x500 /* base address of trace buffers */
 
 /* Register bits */
 #define CONFIG_ENABLE				1
 #define CONFIG_IRQEN				2
 #define CONFIG_IGNORE_ILLEGAL_INSN		4
-#define STATUS_BUF0_FULL			1
-#define STATUS_BUF1_FULL			2
 
 #define MAX_DEVICES 1 /* TODO: (num_possible_cpus()) */
 
@@ -64,6 +60,7 @@ static DEFINE_IDA(tracectrl_ida);
 struct tracectrl_dma_buf {
 	void *buf;
 	dma_addr_t handle;
+	u16 cpu;
 };
 
 struct tracectrl {
@@ -103,15 +100,43 @@ struct tracectrl {
 	bool ignore_illegal_insn;
 };
 
-static inline void tracectrl_reg_write(u32 value, struct tracectrl *ctrl,
+static inline void tracectrl_reg_writel(u32 value, struct tracectrl *ctrl,
 				     unsigned long offset)
 {
 	writel(value, (u8 __iomem *) ctrl->base_addr + offset);
 }
 
-static inline u32 tracectrl_reg_read(struct tracectrl *ctrl, unsigned long offset)
+static inline void tracectrl_reg_writeq(u64 value, struct tracectrl *ctrl,
+				     unsigned long offset)
+{
+#ifdef writeq
+	writeq(value, (u8 __iomem *) ctrl->base_addr + offset);
+#else
+	writel((u32) ((value >>  0) & 0xffffffff),
+	       (u8 __iomem *) ctrl->base_addr + offset);
+	writel((u32) ((value >> 32) & 0xffffffff),
+	       (u8 __iomem *) ctrl->base_addr + offset + 4);
+#endif
+}
+
+
+static inline u32 tracectrl_reg_readl(struct tracectrl *ctrl, unsigned long offset)
 {
 	return readl((u8 __iomem *) ctrl->base_addr + offset);
+}
+
+static inline u64 tracectrl_reg_readq(struct tracectrl *ctrl, unsigned long offset)
+{
+#ifdef readq
+	return readq((u8 __iomem *) ctrl->base_addr + offset);
+#else
+	u32 tmp;
+	u64 val;
+	tmp = readl((u8 __iomem *) ctrl->base_addr + offset);
+	val = readl((u8 __iomem *) ctrl->base_addr + offset + 4);
+	val = (val << 32) | tmp;
+	return val;
+#endif
 }
 
 static const struct of_device_id tracectrl_of_match[] = {
@@ -126,7 +151,7 @@ static ssize_t config_show(struct device *dev, struct device_attribute *attr,
 	u32 reg;
 	struct tracectrl *ctrl = dev_get_drvdata(dev);
 
-	reg = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
+	reg = tracectrl_reg_readl(ctrl, TRACECTRL_CONFIG);
 
 	return sprintf(buf, "%x\n", reg);
 }
@@ -138,7 +163,7 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr,
 	u32 reg;
 	struct tracectrl *ctrl = dev_get_drvdata(dev);
 
-	reg = tracectrl_reg_read(ctrl, TRACECTRL_STATUS);
+	reg = tracectrl_reg_readl(ctrl, TRACECTRL_STATUS_BASE);
 
 	return sprintf(buf, "%x\n", reg);
 }
@@ -236,27 +261,25 @@ static int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
 /**
  * tracectrl_update_buf - Update buffer pointer in control regs
  * @ctrl:	tracectrl device
- * @base:	base address for buffer in control regs
+ * @pos:	buffer position
  * @addr:	buffer pointer
- * @mask:	buffer mask (buffer size - 1)
  * @clear_full:	clear the full flag
  *
  * NB: Lock should be held when calling this function
  *
  * Return: void
  */
-static void tracectrl_update_buf(struct tracectrl *ctrl, unsigned long base,
-				 u64 addr, u64 mask, bool clear_full)
+static void tracectrl_update_buf(struct tracectrl *ctrl, unsigned long pos,
+				 u64 addr, bool clear_full)
 {
-	u32 flag;
-	tracectrl_reg_write((u32) (addr >>  0) & 0xffffffff, ctrl, base);
-	tracectrl_reg_write((u32) (addr >> 32) & 0xffffffff, ctrl, base + 4);
-	tracectrl_reg_write(mask, ctrl, base + 8);
-	tracectrl_reg_write(0, ctrl, base + 0xc);
+	unsigned long offs;
+
+	/* TODO: Support more than 32 cpus */
+	offs = TRACECTRL_BUF_BASE + 8 * pos;
+	tracectrl_reg_writeq(addr, ctrl, offs);
 	if (clear_full) {
-		flag = (base == TRACECTRL_BUF0_ADDR) ?
-			STATUS_BUF0_FULL : STATUS_BUF1_FULL,
-		tracectrl_reg_write(flag, ctrl, TRACECTRL_STATUS);
+		tracectrl_reg_writeq(BIT_ULL(pos), ctrl, TRACECTRL_STATUS_BASE);
+		//tracectrl_reg_writel(BIT_UL(pos), ctrl, TRACECTRL_STATUS_BASE);
 	}
 }
 
@@ -274,7 +297,8 @@ static void tracectrl_free_all_dma_bufs(struct tracectrl *ctrl)
 
 /* Need to rework since we can't do any locking in interrupt handler */
 static struct tracectrl_dma_buf *
-tracectrl_dma_buf_alloc(struct tracectrl *ctrl, gfp_t gfp_flags)
+tracectrl_dma_buf_alloc(struct tracectrl *ctrl, unsigned long cpu,
+			gfp_t gfp_flags)
 {
 	struct tracectrl_dma_buf *buf;
 
@@ -282,6 +306,7 @@ tracectrl_dma_buf_alloc(struct tracectrl *ctrl, gfp_t gfp_flags)
 		return NULL;
 
 	buf = &ctrl->dma_bufs[ctrl->used_dma_bufs];
+	buf->cpu = (u16) cpu;
 
 	/* TODO: Revisit when H/W gets buffer pointer. Then there's no need
 	 * to use zero allocated buffers. */
@@ -312,18 +337,18 @@ static int ioctl_enable(struct tracectrl *ctrl,
 	/* unlock */
 
 	tracectrl_free_all_dma_bufs(ctrl);
-	buf0 = tracectrl_dma_buf_alloc(ctrl, GFP_KERNEL);
-	buf1 = tracectrl_dma_buf_alloc(ctrl, GFP_KERNEL);
+
+	/* TODO: for each cpu do ... { */
+	buf0 = tracectrl_dma_buf_alloc(ctrl, 0, GFP_KERNEL);
+	buf1 = tracectrl_dma_buf_alloc(ctrl, 0, GFP_KERNEL);
 	if (!buf0 || !buf1) {
 		tracectrl_free_all_dma_bufs(ctrl);
 		return -ENOMEM;
 	}
 
-	tracectrl_update_buf(ctrl, TRACECTRL_BUF0_ADDR, buf0->handle,
-			     ctrl->dma_size - 1, true);
-
-	tracectrl_update_buf(ctrl, TRACECTRL_BUF1_ADDR, buf1->handle,
-			     ctrl->dma_size - 1, true);
+	tracectrl_update_buf(ctrl, 0, buf0->handle, true);
+	tracectrl_update_buf(ctrl, 1, buf1->handle, true);
+	/* TODO: for each cpu do ... } */
 
 	tracectrl_init_map_info(ctrl);
 	ctrl->used_metadata_entries = 0;
@@ -336,13 +361,13 @@ static int ioctl_enable(struct tracectrl *ctrl,
 
 	/* Memory barrier here */
 
-	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
+	val = tracectrl_reg_readl(ctrl, TRACECTRL_CONFIG);
 	val |= CONFIG_ENABLE | CONFIG_IRQEN;
 	if (ctrl->ignore_illegal_insn)
 		val |= CONFIG_IGNORE_ILLEGAL_INSN;
 	else
 		val &= ~CONFIG_IGNORE_ILLEGAL_INSN;
-	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
+	tracectrl_reg_writel(val, ctrl, TRACECTRL_CONFIG);
 	/* unlock */
 
 	return 0;
@@ -357,19 +382,22 @@ static int ioctl_disable(struct tracectrl *ctrl,
 		return 0;
 
 	/* lock */
-	val = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
+	val = tracectrl_reg_readl(ctrl, TRACECTRL_CONFIG);
 	val &= ~(CONFIG_ENABLE | CONFIG_IRQEN);
-	tracectrl_reg_write(val, ctrl, TRACECTRL_CONFIG);
+	tracectrl_reg_writel(val, ctrl, TRACECTRL_CONFIG);
+	while (val & CONFIG_ENABLE)
+		val = tracectrl_reg_readl(ctrl, TRACECTRL_CONFIG);
 	/* unlock */
 
-	/* Memory barrier here */
+	smp_mb();
 
 	mmap_notifier_unregister(&ctrl->mmap_notifier);
 	mmap_notifier_dec();
 	preempt_notifier_unregister(&ctrl->preempt_notifier);
 	preempt_notifier_dec();
+	synchronize_rcu();
 
-	/* Memory barrier here */
+	smp_mb();
 
 	/* lock */
 	ctrl->enabled = false;
@@ -530,7 +558,7 @@ static void tracectrl_sched_out(struct preempt_notifier *notifier,
 		container_of(notifier, struct tracectrl, preempt_notifier);
 
 	if (!ctrl->enabled)
-		return;
+		dev_warn(&ctrl->dev, "%s: device not enabled\n", __func__);
 
 	tracectrl_insert_metadata(ctrl, current);
 }
@@ -644,38 +672,38 @@ static __read_mostly struct mmap_notifier_ops tracectrl_mmap_notifier_ops;
 static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 {
 	struct tracectrl *ctrl = dev_id;
-	u32 config, status;
+	u32 config;
+	u64 status;
+	unsigned long pos, cpu;
+	bool handled = false;
 	dma_addr_t addr = 0;
-	unsigned long reg = 0;
 	struct tracectrl_dma_buf *buf;
 
 	/* lock */
-	status = tracectrl_reg_read(ctrl, TRACECTRL_STATUS);
-	/* unlock */
+	status = tracectrl_reg_readq(ctrl, TRACECTRL_STATUS_BASE);
+	while (status) {
+		/* TODO: Iterate over all instead of just first 32 cpu (64/2) */
+		pos = __ffs64(status);
+		cpu = pos / 2;
 
-	if (status & STATUS_BUF0_FULL) {
-		reg = TRACECTRL_BUF0_ADDR;
-	} else if (status & STATUS_BUF1_FULL) {
-		reg = TRACECTRL_BUF1_ADDR;
-	}
-
-	if (reg) {
-		buf = tracectrl_dma_buf_alloc(ctrl, GFP_ATOMIC);
+		buf = tracectrl_dma_buf_alloc(ctrl, cpu, GFP_ATOMIC);
 		if (!buf) {
+			/* TODO return wake thread and handle alloc there if
+			 * it failed here. */
 			printk(KERN_ERR "tracectrl irq failed to alloc\n");
-			config = tracectrl_reg_read(ctrl, TRACECTRL_CONFIG);
+			config = tracectrl_reg_readl(ctrl, TRACECTRL_CONFIG);
 			config &= ~CONFIG_IRQEN;
-			tracectrl_reg_write(config, ctrl, TRACECTRL_CONFIG);
+			tracectrl_reg_writel(config, ctrl, TRACECTRL_CONFIG);
 		} else {
-			tracectrl_update_buf(ctrl, reg, buf->handle,
-					     ctrl->dma_size - 1, true);
+			tracectrl_update_buf(ctrl, pos, buf->handle, true);
 			addr = buf->handle;
 		}
+		handled = true;
+		status &= ~BIT_ULL(pos);
 	}
-	printk(KERN_INFO "tracectrl irq %u  %#x %lu\n",
-	       status, (u32) addr, ctrl->used_dma_bufs);
+	/* unlock */
 
-	return IRQ_HANDLED;
+	return handled ? IRQ_HANDLED : IRQ_NONE;
 }
 
 /**
@@ -764,6 +792,10 @@ static int tracectrl_probe(struct platform_device *pdev)
 	if (!ctrl->dma_pool)
 		goto out_device_destroy;
 
+	/* Initialize registers */
+	tracectrl_reg_writel(0, ctrl, TRACECTRL_CONFIG);
+	tracectrl_reg_writel(ctrl->dma_size - 1, ctrl, TRACECTRL_BUF_MASK);
+
 	tracectrl_preempt_ops.sched_in = tracectrl_sched_in;
 	tracectrl_preempt_ops.sched_out = tracectrl_sched_out;
 	preempt_notifier_init(&ctrl->preempt_notifier, &tracectrl_preempt_ops);
@@ -794,7 +826,7 @@ static int tracectrl_remove(struct platform_device *pdev)
 	sysfs_remove_group(&pdev->dev.kobj, &tracectrl_attr_group);
 
 	/* Disable tracing */
-	tracectrl_reg_write(0, ctrl, TRACECTRL_CONFIG);
+	tracectrl_reg_writel(0, ctrl, TRACECTRL_CONFIG);
 
 	tracectrl_free_all_dma_bufs(ctrl);
 	dma_pool_destroy(ctrl->dma_pool);
