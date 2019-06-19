@@ -60,7 +60,7 @@ static DEFINE_IDA(tracectrl_ida);
 struct tracectrl_dma_buf {
 	void *buf;
 	dma_addr_t handle;
-	u16 cpu;
+	unsigned int cpu;
 };
 
 struct tracectrl {
@@ -213,6 +213,7 @@ static int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 	/* unlock */
 
 	/* TODO: Rework */
+	status->stream_info_size = nr_cpu_ids * sizeof(struct owl_stream_info);
 	status->tracebuf_size = ctrl->dma_size * ctrl->used_dma_bufs;
 	status->sched_info_size =
 		ctrl->used_sched_info_entries * sizeof(struct owl_sched_info);
@@ -297,7 +298,7 @@ tracectrl_dma_buf_alloc(struct tracectrl *ctrl, unsigned long cpu,
 		return NULL;
 
 	buf = &ctrl->dma_bufs[ctrl->used_dma_bufs];
-	buf->cpu = (u16) cpu;
+	buf->cpu = (unsigned int) cpu;
 
 	/* TODO: Revisit when H/W gets buffer pointer. Then there's no need
 	 * to use zero allocated buffers. */
@@ -397,11 +398,23 @@ static int ioctl_disable(struct tracectrl *ctrl,
 	return 0;
 }
 
+static size_t cpu_trace_stream_size(struct tracectrl *ctrl, unsigned int cpu)
+{
+	size_t i, n = 0;
+	for (i = 0; i < ctrl->used_dma_bufs; i++) {
+		if (ctrl->dma_bufs[i].cpu == cpu)
+			n++;
+	}
+	return n * ctrl->dma_size;
+}
+
 static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
-	size_t i, remaining, n = 0;
+	size_t i, remaining, n;
 	struct owl_trace_header *header = &arg->trace_header;
 	u8 __user *p;
+	unsigned int cpu;
+	struct owl_stream_info si = { 0 };
 
 	/* lock */
 	if (ctrl->enabled) {
@@ -410,29 +423,55 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 	}
 	/* unlock */
 
-	/* TODO: Rework */
+	/* Initialize header kernel side values */
 	header->trace_format = ctrl->trace_format;
+	header->tracebuf_size		= 0;
+	header->sched_info_size		= 0;
+	header->map_info_size		= 0;
+	header->stream_info_size	= 0;
 
-	if (!ctrl->used_dma_bufs) {
-		header->tracebuf_size = 0;
+	if (!ctrl->used_dma_bufs)
 		return 0;
+
+	/* Write cpu trace stream info */
+	p = header->streaminfobuf;
+	n = 0;
+	remaining = header->max_stream_info_size;
+	for_each_possible_cpu(cpu) {
+		if (!remaining)
+			break;
+		n = min(remaining, sizeof(si));
+		si.cpu = (u16)cpu;
+		si.offs += si.size;
+		si.size = cpu_trace_stream_size(ctrl, cpu);
+		if (copy_to_user(p, &si, n))
+			return -EFAULT;
+		header->stream_info_size += n;
+		p += n;
+		remaining -= n;
 	}
 
 	/* Copy trace buffer */
 	p = header->tracebuf;
-	for (i = 0, remaining = header->max_tracebuf_size;
-	     i < ctrl->used_dma_bufs && remaining;
-	     i++, remaining -= n) {
-		n = min(remaining, ctrl->dma_size);
-		dma_sync_single_for_cpu(&ctrl->dev, ctrl->dma_bufs[i].handle,
-					n, DMA_FROM_DEVICE);
-		if (copy_to_user(p, ctrl->dma_bufs[i].buf, n))
-			return -EFAULT;
-		header->tracebuf_size += n;
-		p += n;
+	remaining = header->max_tracebuf_size;
+	for_each_possible_cpu(cpu) {
+		for (i = 0; i < ctrl->used_dma_bufs && remaining; i++) {
+			if (ctrl->dma_bufs[i].cpu != cpu)
+				continue;
+			n = min(remaining, ctrl->dma_size);
+			dma_sync_single_for_cpu(&ctrl->dev,
+						ctrl->dma_bufs[i].handle,
+						n,
+						DMA_FROM_DEVICE);
+			if (copy_to_user(p, ctrl->dma_bufs[i].buf, n))
+				return -EFAULT;
+			header->tracebuf_size += n;
+			p += n;
+			remaining -= n;
+		}
 	}
 
-	/* Copy sched_info */
+	/* Copy scheduling info */
 	n = min_t(u64, header->max_sched_info_size,
 		  ctrl->used_sched_info_entries *
 			sizeof(struct owl_sched_info));
@@ -440,7 +479,7 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 		return -EFAULT;
 	header->sched_info_size = n;
 
-	/* Copy sched_info */
+	/* Copy mapping info */
 	n = min_t(u64, header->max_map_info_size,
 		  ctrl->used_map_entries * sizeof(struct owl_map_info));
 	if (copy_to_user(header->mapinfobuf, ctrl->maps, n))

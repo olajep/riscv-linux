@@ -141,9 +141,10 @@ struct owl_trace_header {
 
 	/* Filled in by kernel */
 	enum owl_trace_format trace_format;
-	__u64 tracebuf_size;	/* Size of trace buffer */
-	__u64 sched_info_size;	/* Size of schedinfo */
-	__u64 map_info_size;	/* Size of mapping info */
+	__u64 tracebuf_size;	 /* Size of trace buffer */
+	__u64 sched_info_size;	 /* Size of schedinfo */
+	__u64 map_info_size;	 /* Size of mapping info */
+	__u64 stream_info_size;	 /* Size of cpu trace stream info */
 };
 
 #define OWL_IOCTL_BASE			'o'
