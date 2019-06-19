@@ -20,6 +20,7 @@ struct owl_status {
 	__u64 tracebuf_size;
 	__u64 sched_info_size;
 	__u64 map_info_size;
+	__u64 stream_info_size;
 };
 
 enum owl_trace_format {
@@ -79,7 +80,6 @@ struct owl_pchi_trace {
 	unsigned pchi:32; /* Not sign extended */
 } __attribute__((packed));
 
-
 union owl_trace {
 	__u64 val;
 	struct {
@@ -121,14 +121,23 @@ struct owl_map_info {
 	__u64 vm_end;
 } __attribute__((packed));
 
+struct owl_stream_info {
+	__u16		cpu;
+	__u64:48;	/* pad */
+	__u64	offs;	/* trace buffer offset */
+	__u64	size;	/* size of trace stream */
+} __attribute__((packed));
+
 struct owl_trace_header {
 	/* Filled in by user */
 	void __user *tracebuf;		/* Buffer for traces */
 	void __user *schedinfobuf;	/* Buffer for meta data */
 	void __user *mapinfobuf;	/* Buffer for map info */
+	void __user *streaminfobuf;	/* Buffer for stream info */
 	__u64 max_tracebuf_size;
 	__u64 max_sched_info_size;
 	__u64 max_map_info_size;
+	__u64 max_stream_info_size;
 
 	/* Filled in by kernel */
 	enum owl_trace_format trace_format;
