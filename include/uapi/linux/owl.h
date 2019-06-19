@@ -18,7 +18,7 @@ struct owl_status {
 		__kernel_pid_t cgroup;
 	};
 	__u64 tracebuf_size;
-	__u64 metadata_size;
+	__u64 sched_info_size;
 	__u64 map_info_size;
 };
 
@@ -26,13 +26,8 @@ enum owl_trace_format {
 	OWL_TRACE_FORMAT_DEFAULT,
 };
 
-enum owl_metadata_format {
-	OWL_METADATA_FORMAT_DEFAULT,
-};
-
 struct owl_config {
 	enum owl_trace_format trace_format;
-	enum owl_metadata_format metadata_format; /* ??? Do we need this */
 	__u32 clock_divider; /* How many clocks per tick */
 	union {
 		/* TODO: Decide on which one to use. Seems LvNA Linux are
@@ -107,7 +102,7 @@ struct owl_task {
 	char		comm[OWL_TASK_COMM_LEN];
 } __attribute__((packed));
 
-struct owl_metadata_entry {
+struct owl_sched_info {
 	__u64		timestamp; /* use relative to save space */
 	__u16		cpu; /* 65536 cpus should be enough for now */
 	unsigned	has_mm:1;
@@ -121,6 +116,7 @@ struct owl_metadata_entry {
 struct owl_map_info {
 	char path[OWL_PATH_MAX]; /* TODO: Convert to offset into string table */
 	int pid;
+	unsigned:32; /* pad */
 	__u64 vm_start;
 	__u64 vm_end;
 } __attribute__((packed));
@@ -128,17 +124,16 @@ struct owl_map_info {
 struct owl_trace_header {
 	/* Filled in by user */
 	void __user *tracebuf;		/* Buffer for traces */
-	void __user *metadatabuf;	/* Buffer for meta data */
+	void __user *schedinfobuf;	/* Buffer for meta data */
 	void __user *mapinfobuf;	/* Buffer for map info */
 	__u64 max_tracebuf_size;
-	__u64 max_metadata_size;
+	__u64 max_sched_info_size;
 	__u64 max_map_info_size;
 
 	/* Filled in by kernel */
 	enum owl_trace_format trace_format;
-	enum owl_metadata_format metadata_format;
 	__u64 tracebuf_size;	/* Size of trace buffer */
-	__u64 metadata_size;	/* Size of metadata */
+	__u64 sched_info_size;	/* Size of schedinfo */
 	__u64 map_info_size;	/* Size of mapping info */
 };
 

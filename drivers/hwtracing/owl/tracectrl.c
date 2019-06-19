@@ -81,14 +81,13 @@ struct tracectrl {
 	 * --> kthread-> task A. So if we keep track of the previously
 	 * scheduled user task (by pid?), we don't need to insert
 	 * duplicates. */
-	struct owl_metadata_entry metadata[1024];
-	size_t used_metadata_entries;
+	struct owl_sched_info sched_info[1024];
+	size_t used_sched_info_entries;
 
 	struct owl_map_info maps[1024];
 	size_t used_map_entries;
 
 	enum owl_trace_format trace_format;
-	enum owl_metadata_format metadata_format;
 
 	struct preempt_notifier preempt_notifier;
 	struct mmap_notifier mmap_notifier;
@@ -215,8 +214,8 @@ static int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 
 	/* TODO: Rework */
 	status->tracebuf_size = ctrl->dma_size * ctrl->used_dma_bufs;
-	status->metadata_size =
-		ctrl->used_metadata_entries * sizeof(struct owl_metadata_entry);
+	status->sched_info_size =
+		ctrl->used_sched_info_entries * sizeof(struct owl_sched_info);
 	status->map_info_size =
 		ctrl->used_map_entries * sizeof(struct owl_map_info);
 
@@ -235,14 +234,6 @@ static int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
 		return -EINVAL;
 	}
 	ctrl->trace_format = config->trace_format;
-
-	switch (config->metadata_format) {
-	case OWL_METADATA_FORMAT_DEFAULT:
-		break;
-	default:
-		return -EINVAL;
-	}
-	ctrl->metadata_format = config->metadata_format;
 
 	/* TODO: Rework */
 	if (config->dsid &&
@@ -351,7 +342,7 @@ static int ioctl_enable(struct tracectrl *ctrl,
 	/* TODO: for each cpu do ... } */
 
 	tracectrl_init_map_info(ctrl);
-	ctrl->used_metadata_entries = 0;
+	ctrl->used_sched_info_entries = 0;
 	preempt_notifier_inc();
 	preempt_notifier_all_register(&ctrl->preempt_notifier);
 
@@ -421,7 +412,6 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 
 	/* TODO: Rework */
 	header->trace_format = ctrl->trace_format;
-	header->metadata_format = ctrl->metadata_format;
 
 	if (!ctrl->used_dma_bufs) {
 		header->tracebuf_size = 0;
@@ -442,15 +432,15 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 		p += n;
 	}
 
-	/* Copy metadata */
-	n = min_t(u64, header->max_metadata_size,
-		  ctrl->used_metadata_entries *
-			sizeof(struct owl_metadata_entry));
-	if (copy_to_user(header->metadatabuf, ctrl->metadata, n))
+	/* Copy sched_info */
+	n = min_t(u64, header->max_sched_info_size,
+		  ctrl->used_sched_info_entries *
+			sizeof(struct owl_sched_info));
+	if (copy_to_user(header->schedinfobuf, ctrl->sched_info, n))
 		return -EFAULT;
-	header->metadata_size = n;
+	header->sched_info_size = n;
 
-	/* Copy metadata */
+	/* Copy sched_info */
 	n = min_t(u64, header->max_map_info_size,
 		  ctrl->used_map_entries * sizeof(struct owl_map_info));
 	if (copy_to_user(header->mapinfobuf, ctrl->maps, n))
@@ -531,24 +521,24 @@ static void tracectrl_sched_in(struct preempt_notifier *notifier, int cpu)
 	 * NULL check ops in struct preempt_ops. */
 }
 
-static void tracectrl_insert_metadata(struct tracectrl *ctrl,
+static void tracectrl_insert_sched_info(struct tracectrl *ctrl,
 				      struct task_struct *task)
 {
-	struct owl_metadata_entry *entry;
-	if (ctrl->used_metadata_entries >= ARRAY_SIZE(ctrl->metadata))
+	struct owl_sched_info *entry;
+	if (ctrl->used_sched_info_entries >= ARRAY_SIZE(ctrl->sched_info))
 		return;
 
-	entry			= &ctrl->metadata[ctrl->used_metadata_entries];
+	entry			= &ctrl->sched_info[ctrl->used_sched_info_entries];
 	entry->timestamp	= get_timestamp();
 	entry->cpu		= (u16) smp_processor_id();
 	entry->has_mm		= task->mm != NULL;
 	entry->in_execve	= task->in_execve;
-	entry->kthread	= !!(task->flags & PF_KTHREAD);
+	entry->kthread		= !!(task->flags & PF_KTHREAD);
 	entry->task.pid		= (int) task_pid_nr(task);
 	entry->task.ppid	= (int) task_ppid_nr(task);
 	memcpy(entry->task.comm, task->comm, TASK_COMM_LEN);
 
-	ctrl->used_metadata_entries++;
+	ctrl->used_sched_info_entries++;
 }
 
 static void tracectrl_sched_out(struct preempt_notifier *notifier,
@@ -560,7 +550,8 @@ static void tracectrl_sched_out(struct preempt_notifier *notifier,
 	if (!ctrl->enabled)
 		dev_warn(&ctrl->dev, "%s: device not enabled\n", __func__);
 
-	tracectrl_insert_metadata(ctrl, current);
+	tracectrl_insert_sched_info(ctrl, current);
+
 }
 
 static __read_mostly struct preempt_ops tracectrl_preempt_ops;
