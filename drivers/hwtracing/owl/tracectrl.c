@@ -568,6 +568,7 @@ static void tracectrl_insert_sched_info(struct tracectrl *ctrl,
 		return;
 
 	entry			= &ctrl->sched_info[ctrl->used_sched_info_entries];
+	memset(entry, 0, sizeof(*entry));
 	entry->timestamp	= get_timestamp();
 	entry->cpu		= (u16) smp_processor_id();
 	entry->has_mm		= task->mm != NULL;
