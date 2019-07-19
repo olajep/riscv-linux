@@ -591,7 +591,6 @@ static void tracectrl_sched_out(struct preempt_notifier *notifier,
 		dev_warn(&ctrl->dev, "%s: device not enabled\n", __func__);
 
 	tracectrl_insert_sched_info(ctrl, current);
-
 }
 
 static __read_mostly struct preempt_ops tracectrl_preempt_ops;
@@ -609,7 +608,7 @@ static void tracectrl_insert_map(struct tracectrl *ctrl,
 		return;
 
 	if (!current) {
-		printk(KERN_INFO "tracectrl_mmap_event: no current task\n");
+		dev_dbg(&ctrl->dev, "%s: no current task\n", __func__);
 		return;
 	}
 
@@ -660,7 +659,7 @@ got_path:
 
 	ctrl->used_map_entries++;
 	if (ctrl->used_map_entries == ARRAY_SIZE(ctrl->maps))
-		printk(KERN_INFO "tracectrl: map info full\n");
+		dev_dbg(&ctrl->dev, "%s: map info full\n", __func__);
 }
 
 void tracectrl_init_map_info(struct tracectrl *ctrl)
@@ -704,14 +703,15 @@ static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 {
 	struct tracectrl *ctrl = dev_id;
 	u32 config;
-	u64 status;
+	u64 status, first_status;
 	unsigned long pos, cpu;
-	bool handled = false;
+	int handled = 0;
 	dma_addr_t addr = 0;
 	struct tracectrl_dma_buf *buf;
 
 	/* lock */
 	status = tracectrl_reg_readq(ctrl, TRACECTRL_STATUS_BASE);
+	first_status = status;
 	while (status) {
 		/* TODO: Iterate over all instead of just first 32 cpu (64/2) */
 		pos = __ffs64(status);
@@ -721,7 +721,8 @@ static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 		if (!buf) {
 			/* TODO return wake thread and handle alloc there if
 			 * it failed here. */
-			printk(KERN_ERR "tracectrl irq failed to alloc\n");
+			dev_err(&ctrl->dev, "%s: failed to alloc dma\n",
+				__func__);
 			config = tracectrl_reg_readl(ctrl, TRACECTRL_CONFIG);
 			config &= ~CONFIG_IRQEN;
 			tracectrl_reg_writel(config, ctrl, TRACECTRL_CONFIG);
@@ -729,10 +730,13 @@ static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 			tracectrl_update_buf(ctrl, pos, buf->handle, true);
 			addr = buf->handle;
 		}
-		handled = true;
+		handled++;
 		status &= ~BIT_ULL(pos);
 	}
 	/* unlock */
+
+	dev_dbg(&ctrl->dev, "%s: irq %llu  %#x %lu %d\n", __func__,
+		first_status, (u32) addr, ctrl->used_dma_bufs, handled);
 
 	return handled ? IRQ_HANDLED : IRQ_NONE;
 }
@@ -766,14 +770,15 @@ static int tracectrl_probe(struct platform_device *pdev)
 	/* Interrupt */
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0) {
-		dev_err(&pdev->dev, "Could not get IRQ from platform data\n");
+		dev_err(&pdev->dev,
+			"%s: could not get IRQ from platform data\n", __func__);
 		return irq;
 	}
 
 	res = devm_request_irq(&pdev->dev, irq, tracectrl_irq_handler, 0,
 			dev_name(&pdev->dev), ctrl);
 	if (res) {
-		dev_err(&pdev->dev, "Could not request IRQ\n");
+		dev_err(&pdev->dev, "%s: could not request IRQ\n", __func__);
 		return res;
 	}
 
@@ -782,7 +787,8 @@ static int tracectrl_probe(struct platform_device *pdev)
 	res = sysfs_create_group(&pdev->dev.kobj, &tracectrl_attr_group);
 	if (res < 0) {
 		dev_err(&pdev->dev,
-			"Can't register sysfs attr group: %d\n", res);
+			"%s: can't register sysfs attr group: %d\n",
+			__func__, res);
 		return res;
 	}
 
@@ -790,7 +796,8 @@ static int tracectrl_probe(struct platform_device *pdev)
 	res = ida_simple_get(&tracectrl_ida, 0, MAX_DEVICES, GFP_KERNEL);
 	if (res < 0) {
 		dev_err(&pdev->dev,
-			"Can't register sysfs attr group: %d\n", res);
+			"%s: can't register sysfs attr group: %d\n",
+			__func__, res);
 		goto out_sysfs_remove;
 	}
 
@@ -802,7 +809,7 @@ static int tracectrl_probe(struct platform_device *pdev)
 	res = cdev_add(&ctrl->cdev, devt, 1);
 	if (res) {
 		dev_err(&ctrl->dev,
-			"char device registration failed\n");
+			"%s: char device registration failed\n", __func__);
 		goto out_minor_remove;
 	}
 	ctrl->dev.class = &tracectrl_class;
