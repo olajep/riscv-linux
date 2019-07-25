@@ -41,10 +41,11 @@
 #define DRV_NAME "riscv-tracectrl"
 
 /* Register offsets */
-#define TRACECTRL_CONFIG	0x000 /* config register */
-#define TRACECTRL_BUF_MASK	0x008 /* mask size of trace buffer 0 */
-#define TRACECTRL_STATUS_BASE	0x100 /* buffer status base */
-#define TRACECTRL_BUF_BASE	0x500 /* base address of trace buffers */
+#define TRACECTRL_CONFIG	0x0000 /* config register */
+#define TRACECTRL_BUF_MASK	0x0008 /* mask size of trace buffer 0 */
+#define TRACECTRL_STATUS_BASE	0x0100 /* buffer status base */
+#define TRACECTRL_BUF_BASE	0x0500 /* base address of trace buffers */
+#define TRACECTRL_BUFPTR_BASE	0x9000 /* base address of trace offset status */
 
 /* Register bits */
 #define CONFIG_ENABLE				1
@@ -168,6 +169,31 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RO(status);
 
+static ssize_t bufptr0_show(struct device *dev, struct device_attribute *attr,
+			    char *buf)
+{
+	u32 reg;
+	struct tracectrl *ctrl = dev_get_drvdata(dev);
+
+	reg = tracectrl_reg_readl(ctrl, TRACECTRL_BUFPTR_BASE);
+
+	return sprintf(buf, "%x\n", reg);
+}
+static DEVICE_ATTR_RO(bufptr0);
+
+static ssize_t bufptr1_show(struct device *dev, struct device_attribute *attr,
+			    char *buf)
+{
+	u32 reg;
+	struct tracectrl *ctrl = dev_get_drvdata(dev);
+
+	reg = tracectrl_reg_readl(ctrl, TRACECTRL_BUFPTR_BASE + 4);
+
+	return sprintf(buf, "%x\n", reg);
+}
+static DEVICE_ATTR_RO(bufptr1);
+
+/* TODO: Remove */
 static ssize_t dump_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
@@ -190,6 +216,8 @@ static struct attribute *tracectrl_attrs[] = {
 	&dev_attr_config.attr,
 	&dev_attr_status.attr,
 	&dev_attr_dump.attr,
+	&dev_attr_bufptr0.attr,
+	&dev_attr_bufptr1.attr,
 	NULL,
 };
 
@@ -204,17 +232,101 @@ union ioctl_arg {
 	struct owl_trace_header	trace_header;
 };
 
+/**
+ * last_buffer_size - Get used size for last used buffer
+ * @ctrl:	tracectrl device
+ * @cpu:	cpu
+ * @buf:	buffer 0 or buffer 1
+ *
+ * NB: ctrl->lock must be held by the caller. ctrl->enabled must NOT be
+ * enabled.
+ *
+ * Return: The used area of the buffer
+ */
+static u32 last_buffer_size(struct tracectrl *ctrl, unsigned int cpu,
+			    unsigned int buf)
+{
+	unsigned long reg;
+	u32 ptr;
+
+	reg = TRACECTRL_BUFPTR_BASE + cpu + buf * 4;
+	ptr = tracectrl_reg_readl(ctrl, reg);
+	return ptr;
+}
+
+/**
+ * cpu_unused_bufsize - Get the unused size of the allocated buffers for a cpu
+ * @ctrl:	tracectrl device
+ * @cpu:	cpu
+ *
+ * NB: ctrl->lock must be held by the caller. ctrl->enabled must NOT be
+ * enabled.
+ *
+ * Return: The unused area of the allocated buffers.
+ */
+static u32 cpu_unused_bufsize(struct tracectrl *ctrl, unsigned int cpu)
+{
+	u32 s, unused = 0;
+	/* buf0 */
+	s = last_buffer_size(ctrl, cpu, 0);
+	if (s < ctrl->dma_size)
+		unused += ctrl->dma_size - s;
+	/* buf1 */
+	s = last_buffer_size(ctrl, cpu, 1);
+	if (s < ctrl->dma_size)
+		unused += ctrl->dma_size - s;
+
+	return unused;
+}
+
+/**
+ * total_tracebuf_size - Calculate total size of tracebuf
+ * @ctrl:	tracectrl device
+ *
+ * NB: ctrl->lock must be held by the caller. The value will be inexact if the
+ * tracectrl is currently enabled.
+ *
+ * Return: The total size of the tracebuffers for all cpus.
+ */
+static size_t total_tracebuf_size(struct tracectrl *ctrl)
+{
+	unsigned int cpu;
+	size_t total_size, unused;
+
+	total_size = ctrl->dma_size * ctrl->used_dma_bufs;
+
+	if (ctrl->enabled)
+		return total_size;
+
+	for_each_possible_cpu(cpu) {
+		unused = cpu_unused_bufsize(ctrl, cpu);
+		if (unused <= total_size)
+			total_size -= unused;
+		else {
+			dev_warn(&ctrl->dev, "%s: buffer underrun\n", __func__);
+			return 0;
+		}
+	}
+	return total_size;
+}
+
+/**
+ * ioctl_get_status - ioctl for getting the status of the tracectrl
+ * @ctrl:	tracectrl device
+ * @arg:	return pointer
+ *
+ * NB: ctrl->mutex & ctrl->lock must be held by the caller.
+ *
+ * Return: 0 always
+ */
 static int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
 	struct owl_status *status = &arg->status;
 
-	/* lock */
 	status->enabled = ctrl->enabled;
-	/* unlock */
 
-	/* TODO: Rework */
 	status->stream_info_size = nr_cpu_ids * sizeof(struct owl_stream_info);
-	status->tracebuf_size = ctrl->dma_size * ctrl->used_dma_bufs;
+	status->tracebuf_size = total_tracebuf_size(ctrl);
 	status->sched_info_size =
 		ctrl->used_sched_info_entries * sizeof(struct owl_sched_info);
 	status->map_info_size =
@@ -223,6 +335,15 @@ static int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 	return 0;
 }
 
+/**
+ * ioctl_set_config - ioctl for configuring the tracectrl
+ * @ctrl:	tracectrl device
+ * @arg:	user config arguments
+ *
+ * NB: ctrl->mutex & ctrl->lock must be held by the caller.
+ *
+ * Return: 0 on success
+ */
 static int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
 	extern int pid_max;
@@ -257,7 +378,7 @@ static int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
  * @addr:	buffer pointer
  * @clear_full:	clear the full flag
  *
- * NB: Lock should be held when calling this function
+ * NB: ctrl->lock should be held when calling this function
  *
  * Return: void
  */
@@ -271,7 +392,6 @@ static void tracectrl_update_buf(struct tracectrl *ctrl, unsigned long pos,
 	tracectrl_reg_writeq(addr, ctrl, offs);
 	if (clear_full) {
 		tracectrl_reg_writeq(BIT_ULL(pos), ctrl, TRACECTRL_STATUS_BASE);
-		//tracectrl_reg_writel(BIT_UL(pos), ctrl, TRACECTRL_STATUS_BASE);
 	}
 }
 
@@ -400,28 +520,83 @@ static int ioctl_disable(struct tracectrl *ctrl,
 
 static size_t cpu_trace_stream_size(struct tracectrl *ctrl, unsigned int cpu)
 {
-	size_t i, n = 0;
+	size_t i, size, unused, n = 0;
 	for (i = 0; i < ctrl->used_dma_bufs; i++) {
 		if (ctrl->dma_bufs[i].cpu == cpu)
 			n++;
 	}
-	return n * ctrl->dma_size;
+	size = n * ctrl->dma_size;
+	if (!ctrl->enabled) {
+		unused = cpu_unused_bufsize(ctrl, cpu);
+		if (unused <= size) {
+			size -= unused;
+		} else {
+			dev_warn(&ctrl->dev, "%s: buffer underrun\n", __func__);
+			return 0;
+		}
+	}
+
+
+	return size;
+}
+
+struct tracectrl_dma_buf *cpu_last_used_dmabuf(struct tracectrl *ctrl,
+					       unsigned int cpu,
+					       size_t *last_size)
+{
+	struct tracectrl_dma_buf *buf = NULL;
+	size_t i, size, unused_bufs = 0;
+
+	if (!ctrl->used_dma_bufs)
+		return NULL;
+
+	/* check buf0 and buf1 */
+	if (last_buffer_size(ctrl, cpu, 0) == 0)
+		unused_bufs++;
+	if (last_buffer_size(ctrl, cpu, 1) == 0)
+		unused_bufs++;
+
+	if (unused_bufs == 2) {
+		if (last_size)
+			*last_size = 0;
+		return NULL;
+	}
+	if (unused_bufs == 0)
+		dev_warn(&ctrl->dev, "%s: both buffers used\n", __func__);
+
+	for (i = ctrl->used_dma_bufs; i > 0; i--) {
+		if (ctrl->dma_bufs[i - 1].cpu != cpu)
+			continue;
+		if (unused_bufs) {
+			unused_bufs--;
+			continue;
+		}
+		buf = &ctrl->dma_bufs[i - 1];
+		break;
+	}
+	if (!buf)
+		return NULL;
+
+	if (last_size) {
+		size = last_buffer_size(ctrl, cpu, 0);
+		if (!size)
+			size = last_buffer_size(ctrl, cpu, 1);
+		*last_size = size;
+	}
+	return buf;
 }
 
 static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 {
-	size_t i, remaining, n;
+	size_t i, remaining, n, last_size;
 	struct owl_trace_header *header = &arg->trace_header;
 	u8 __user *p;
 	unsigned int cpu;
 	struct owl_stream_info si = { 0 };
+	struct tracectrl_dma_buf *last_buf;
 
-	/* lock */
-	if (ctrl->enabled) {
-		/* unlock */
+	if (ctrl->enabled)
 		return -EBUSY;
-	}
-	/* unlock */
 
 	/* Initialize header kernel side values */
 	header->trace_format = ctrl->trace_format;
@@ -453,12 +628,21 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 
 	/* Copy trace buffer */
 	p = header->tracebuf;
-	remaining = header->max_tracebuf_size;
+	remaining = min_t(u64, header->max_tracebuf_size,
+			  total_tracebuf_size(ctrl));
 	for_each_possible_cpu(cpu) {
+		last_buf = cpu_last_used_dmabuf(ctrl, cpu, &last_size);
+		if (!last_buf)
+			continue;
 		for (i = 0; i < ctrl->used_dma_bufs && remaining; i++) {
 			if (ctrl->dma_bufs[i].cpu != cpu)
 				continue;
 			n = min(remaining, ctrl->dma_size);
+			if (&ctrl->dma_bufs[i] == last_buf)
+				n = min(n, last_size);
+			dev_dbg(&ctrl->dev,
+				"%s: n=%lu cpu=%u buf->cpu=%u i=%lu\n",
+				__func__, n, cpu, ctrl->dma_bufs[i].cpu, i);
 			dma_sync_single_for_cpu(&ctrl->dev,
 						ctrl->dma_bufs[i].handle,
 						n,
@@ -468,6 +652,8 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 			header->tracebuf_size += n;
 			p += n;
 			remaining -= n;
+			if (&ctrl->dma_bufs[i] == last_buf)
+				break;
 		}
 	}
 
