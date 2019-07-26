@@ -762,7 +762,7 @@ static void tracectrl_insert_sched_info(struct tracectrl *ctrl,
 	entry->kthread		= !!(task->flags & PF_KTHREAD);
 	entry->task.pid		= (int) task_pid_nr(task);
 	entry->task.ppid	= (int) task_ppid_nr(task);
-	memcpy(entry->task.comm, task->comm, TASK_COMM_LEN);
+	strncpy(entry->task.comm, task->comm, TASK_COMM_LEN);
 
 	ctrl->used_sched_info_entries++;
 }
