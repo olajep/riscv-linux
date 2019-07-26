@@ -67,6 +67,7 @@ struct tracectrl_dma_buf {
 struct tracectrl {
 	bool enabled;
 	void __iomem *base_addr;
+	struct mutex mutex;
 	spinlock_t lock;
 
 	struct cdev cdev;
@@ -233,7 +234,7 @@ union ioctl_arg {
 };
 
 /**
- * last_buffer_size - Get used size for last used buffer
+ * last_active_buffer_size - Get used size for last used buffer
  * @ctrl:	tracectrl device
  * @cpu:	cpu
  * @buf:	buffer 0 or buffer 1
@@ -243,8 +244,9 @@ union ioctl_arg {
  *
  * Return: The used area of the buffer
  */
-static u32 last_buffer_size(struct tracectrl *ctrl, unsigned int cpu,
-			    unsigned int buf)
+static u32 last_active_buffer_size(struct tracectrl *ctrl, unsigned int cpu,
+				   unsigned int buf)
+__must_hold(&ctrl->lock)
 {
 	unsigned long reg;
 	u32 ptr;
@@ -265,14 +267,15 @@ static u32 last_buffer_size(struct tracectrl *ctrl, unsigned int cpu,
  * Return: The unused area of the allocated buffers.
  */
 static u32 cpu_unused_bufsize(struct tracectrl *ctrl, unsigned int cpu)
+__must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
 	u32 s, unused = 0;
 	/* buf0 */
-	s = last_buffer_size(ctrl, cpu, 0);
+	s = last_active_buffer_size(ctrl, cpu, 0);
 	if (s < ctrl->dma_size)
 		unused += ctrl->dma_size - s;
 	/* buf1 */
-	s = last_buffer_size(ctrl, cpu, 1);
+	s = last_active_buffer_size(ctrl, cpu, 1);
 	if (s < ctrl->dma_size)
 		unused += ctrl->dma_size - s;
 
@@ -289,6 +292,7 @@ static u32 cpu_unused_bufsize(struct tracectrl *ctrl, unsigned int cpu)
  * Return: The total size of the tracebuffers for all cpus.
  */
 static size_t total_tracebuf_size(struct tracectrl *ctrl)
+__must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
 	unsigned int cpu;
 	size_t total_size, unused;
@@ -320,6 +324,7 @@ static size_t total_tracebuf_size(struct tracectrl *ctrl)
  * Return: 0 always
  */
 static int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
+__must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
 	struct owl_status *status = &arg->status;
 
@@ -345,6 +350,7 @@ static int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
  * Return: 0 on success
  */
 static int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
+__must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
 	extern int pid_max;
 	struct owl_config *config = &arg->config;
@@ -384,6 +390,7 @@ static int ioctl_set_config(struct tracectrl *ctrl, union ioctl_arg *arg)
  */
 static void tracectrl_update_buf(struct tracectrl *ctrl, unsigned long pos,
 				 u64 addr, bool clear_full)
+__must_hold(&ctrl->lock)
 {
 	unsigned long offs;
 
@@ -395,8 +402,16 @@ static void tracectrl_update_buf(struct tracectrl *ctrl, unsigned long pos,
 	}
 }
 
-
+/**
+ * tracectrl_free_all_dma_bufs - Free all dma buffers
+ * @ctrl:	tracectrl device
+ *
+ * NB: &ctrl->lock should be held when calling this function
+ *
+ * Return: void
+ */
 static void tracectrl_free_all_dma_bufs(struct tracectrl *ctrl)
+__must_hold(&ctrl->lock)
 {
 	struct tracectrl_dma_buf *buf;
 
@@ -407,10 +422,20 @@ static void tracectrl_free_all_dma_bufs(struct tracectrl *ctrl)
 	}
 }
 
-/* Need to rework since we can't do any locking in interrupt handler */
+/**
+ * tracectrl_dma_buf_alloc - Allocate a new DMA buffer
+ * @ctrl:	tracectrl device
+ * @cpu:	the cpu the buffer belongs to
+ * @gfp_flags:	allocation flags
+ *
+ * NB: ctrl->lock should be held when calling this function
+ *
+ * Return: void
+ */
 static struct tracectrl_dma_buf *
 tracectrl_dma_buf_alloc(struct tracectrl *ctrl, unsigned long cpu,
 			gfp_t gfp_flags)
+__must_hold(&ctrl->lock)
 {
 	struct tracectrl_dma_buf *buf;
 
@@ -432,21 +457,16 @@ tracectrl_dma_buf_alloc(struct tracectrl *ctrl, unsigned long cpu,
 
 void tracectrl_init_map_info(struct tracectrl *ctrl);
 
-/* Redo locking?!? */
 static int ioctl_enable(struct tracectrl *ctrl,
 			union ioctl_arg __always_unused *arg)
+__must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
 	u32 val;
 
 	struct tracectrl_dma_buf *buf0, *buf1;
 
-	/* lock */
-	if (ctrl->enabled) {
-		/* unlock */
+	if (ctrl->enabled)
 		return 0; /* Idempotent. Or is -EBUSY better? */
-	}
-
-	/* unlock */
 
 	tracectrl_free_all_dma_bufs(ctrl);
 
@@ -467,11 +487,9 @@ static int ioctl_enable(struct tracectrl *ctrl,
 	preempt_notifier_inc();
 	preempt_notifier_all_register(&ctrl->preempt_notifier);
 
-	/* Memory barrier here */
-
+	smp_mb();
 	ctrl->enabled = true;
-
-	/* Memory barrier here */
+	smp_mb();
 
 	val = tracectrl_reg_readl(ctrl, TRACECTRL_CONFIG);
 	val |= CONFIG_ENABLE | CONFIG_IRQEN;
@@ -480,26 +498,24 @@ static int ioctl_enable(struct tracectrl *ctrl,
 	else
 		val &= ~CONFIG_IGNORE_ILLEGAL_INSN;
 	tracectrl_reg_writel(val, ctrl, TRACECTRL_CONFIG);
-	/* unlock */
 
 	return 0;
 }
 
 static int ioctl_disable(struct tracectrl *ctrl,
 			 union ioctl_arg __always_unused *arg)
+__must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
 	u32 val;
 
 	if (!ctrl->enabled)
 		return 0;
 
-	/* lock */
 	val = tracectrl_reg_readl(ctrl, TRACECTRL_CONFIG);
 	val &= ~(CONFIG_ENABLE | CONFIG_IRQEN);
 	tracectrl_reg_writel(val, ctrl, TRACECTRL_CONFIG);
 	while (val & CONFIG_ENABLE)
 		val = tracectrl_reg_readl(ctrl, TRACECTRL_CONFIG);
-	/* unlock */
 
 	smp_mb();
 
@@ -511,14 +527,13 @@ static int ioctl_disable(struct tracectrl *ctrl,
 
 	smp_mb();
 
-	/* lock */
 	ctrl->enabled = false;
-	/* unlock */
 
 	return 0;
 }
 
 static size_t cpu_trace_stream_size(struct tracectrl *ctrl, unsigned int cpu)
+__must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
 	size_t i, size, unused, n = 0;
 	for (i = 0; i < ctrl->used_dma_bufs; i++) {
@@ -540,9 +555,10 @@ static size_t cpu_trace_stream_size(struct tracectrl *ctrl, unsigned int cpu)
 	return size;
 }
 
-struct tracectrl_dma_buf *cpu_last_used_dmabuf(struct tracectrl *ctrl,
-					       unsigned int cpu,
-					       size_t *last_size)
+static struct tracectrl_dma_buf *cpu_last_used_dmabuf(struct tracectrl *ctrl,
+						      unsigned int cpu,
+						      size_t *last_size)
+__must_hold(&ctrl->lock)
 {
 	struct tracectrl_dma_buf *buf = NULL;
 	size_t i, size, unused_bufs = 0;
@@ -551,9 +567,9 @@ struct tracectrl_dma_buf *cpu_last_used_dmabuf(struct tracectrl *ctrl,
 		return NULL;
 
 	/* check buf0 and buf1 */
-	if (last_buffer_size(ctrl, cpu, 0) == 0)
+	if (last_active_buffer_size(ctrl, cpu, 0) == 0)
 		unused_bufs++;
-	if (last_buffer_size(ctrl, cpu, 1) == 0)
+	if (last_active_buffer_size(ctrl, cpu, 1) == 0)
 		unused_bufs++;
 
 	if (unused_bufs == 2) {
@@ -578,15 +594,16 @@ struct tracectrl_dma_buf *cpu_last_used_dmabuf(struct tracectrl *ctrl,
 		return NULL;
 
 	if (last_size) {
-		size = last_buffer_size(ctrl, cpu, 0);
+		size = last_active_buffer_size(ctrl, cpu, 0);
 		if (!size)
-			size = last_buffer_size(ctrl, cpu, 1);
+			size = last_active_buffer_size(ctrl, cpu, 1);
 		*last_size = size;
 	}
 	return buf;
 }
 
 static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
+__must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
 	size_t i, remaining, n, last_size;
 	struct owl_trace_header *header = &arg->trace_header;
@@ -687,7 +704,8 @@ static int (* const ioctl_handlers[])(struct tracectrl *, union ioctl_arg *) = {
 static long tracectrl_ioctl(struct file *file, unsigned int cmd,
 			    unsigned long arg)
 {
-	union ioctl_arg buf = { 0 };
+	unsigned long flags;
+	union ioctl_arg buf = { { 0 } };
 	int ret;
 	struct tracectrl *ctrl = file->private_data;
 
@@ -700,7 +718,13 @@ static long tracectrl_ioctl(struct file *file, unsigned int cmd,
 		if (copy_from_user(&buf, (void __user *)arg, _IOC_SIZE(cmd)))
 			return -EFAULT;
 
+	/* TODO: Potential for better performance by more fine grained locking
+	 * in the individual ioctl handlers. */
+	mutex_lock(&ctrl->mutex);
+	spin_lock_irqsave(&ctrl->lock, flags);
 	ret = ioctl_handlers[_IOC_NR(cmd)](ctrl, &buf);
+	spin_unlock_irqrestore(&ctrl->lock, flags);
+	mutex_unlock(&ctrl->mutex);
 	if (ret < 0)
 		return ret;
 
@@ -746,8 +770,16 @@ static void tracectrl_sched_in(struct preempt_notifier *notifier, int cpu)
 	 * NULL check ops in struct preempt_ops. */
 }
 
+/**
+ * tracectrl_insert_sched_info - Record scheduling event
+ * @ctrl:	tracectrl device
+ * @task:	scheduled out task
+ *
+ * NB: ctrl->mutex must be held by the caller.
+ */
 static void tracectrl_insert_sched_info(struct tracectrl *ctrl,
 				      struct task_struct *task)
+__must_hold(&ctrl->mutex)
 {
 	struct owl_sched_info *entry;
 	if (ctrl->used_sched_info_entries >= ARRAY_SIZE(ctrl->sched_info))
@@ -773,17 +805,28 @@ static void tracectrl_sched_out(struct preempt_notifier *notifier,
 	struct tracectrl *ctrl =
 		container_of(notifier, struct tracectrl, preempt_notifier);
 
+	mutex_lock(&ctrl->mutex);
 	if (!ctrl->enabled)
 		dev_warn(&ctrl->dev, "%s: device not enabled\n", __func__);
 
 	tracectrl_insert_sched_info(ctrl, current);
+	mutex_unlock(&ctrl->mutex);
 }
 
 static __read_mostly struct preempt_ops tracectrl_preempt_ops;
 
+/**
+ * tracectrl_insert_map - Insert mmap info
+ * @ctrl:	tracectrl device
+ * @vma:	vm area
+ * @task:	task the vma belongs to
+ *
+ * NB: ctrl->mutex must be held by the caller.
+ */
 static void tracectrl_insert_map(struct tracectrl *ctrl,
 				 struct vm_area_struct *vma,
 				 struct task_struct *task)
+__must_hold(&ctrl->mutex)
 {
 	struct owl_map_info *entry;
 	const char *path;
@@ -800,11 +843,6 @@ static void tracectrl_insert_map(struct tracectrl *ctrl,
 
 	if (ctrl->used_map_entries >= ARRAY_SIZE(ctrl->maps))
 		return;
-
-#if 0
-	if (vma->vm_file) /* We'll save some space but is it worth it?!? */
-		return;
-#endif
 
 	entry = &ctrl->maps[ctrl->used_map_entries];
 	entry->pid	= task->pid;
@@ -848,7 +886,16 @@ got_path:
 		dev_dbg(&ctrl->dev, "%s: map info full\n", __func__);
 }
 
+/**
+ * tracectrl_init_map_info - Initialize tracectrl map info
+ * @ctrl:	tracectrl device
+ *
+ * NB: ctrl->mutex should be held when calling this function
+ *
+ * Return: void
+ */
 void tracectrl_init_map_info(struct tracectrl *ctrl)
+__must_hold(&ctrl->mutex)
 {
 	struct task_struct *p;
 	struct mm_struct *mm;
@@ -879,12 +926,13 @@ static void tracectrl_mmap_event(struct mmap_notifier *notifier,
 	struct tracectrl *ctrl =
 		container_of(notifier, struct tracectrl, mmap_notifier);
 
+	mutex_lock(&ctrl->mutex);
 	tracectrl_insert_map(ctrl, vma, current);
+	mutex_unlock(&ctrl->mutex);
 }
 
 static __read_mostly struct mmap_notifier_ops tracectrl_mmap_notifier_ops;
 
-/* TODO: Redo / implement locking */
 static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 {
 	struct tracectrl *ctrl = dev_id;
@@ -894,8 +942,9 @@ static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 	int handled = 0;
 	dma_addr_t addr = 0;
 	struct tracectrl_dma_buf *buf;
+	unsigned long flags;
 
-	/* lock */
+	spin_lock_irqsave(&ctrl->lock, flags);
 	status = tracectrl_reg_readq(ctrl, TRACECTRL_STATUS_BASE);
 	first_status = status;
 	while (status) {
@@ -907,7 +956,8 @@ static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 		if (!buf) {
 			/* TODO return wake thread and handle alloc there if
 			 * it failed here. */
-			dev_err(&ctrl->dev, "%s: failed to alloc dma\n",
+			dev_err(&ctrl->dev,
+				"%s: failed to alloc dma. disabling interrupts\n",
 				__func__);
 			config = tracectrl_reg_readl(ctrl, TRACECTRL_CONFIG);
 			config &= ~CONFIG_IRQEN;
@@ -919,7 +969,7 @@ static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 		handled++;
 		status &= ~BIT_ULL(pos);
 	}
-	/* unlock */
+	spin_unlock_irqrestore(&ctrl->lock, flags);
 
 	dev_dbg(&ctrl->dev, "%s: irq %llu  %#x %lu %d\n", __func__,
 		first_status, (u32) addr, ctrl->used_dma_bufs, handled);
@@ -968,6 +1018,7 @@ static int tracectrl_probe(struct platform_device *pdev)
 		return res;
 	}
 
+	mutex_init(&ctrl->mutex);
 	spin_lock_init(&ctrl->lock);
 
 	res = sysfs_create_group(&pdev->dev.kobj, &tracectrl_attr_group);
