@@ -977,6 +977,12 @@ static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 		pos = __ffs64(status);
 		cpu = pos / 2;
 
+		if (((status >> (2 * cpu)) & 3) == 3) {
+			dev_warn(&ctrl->dev,
+				"%s: both buffer full flags set for cpu=%lu. trace likely incomplete.\n",
+				__func__, cpu);
+		}
+
 		buf = tracectrl_dma_buf_alloc(ctrl, cpu, GFP_ATOMIC);
 		if (!buf) {
 			/* TODO return wake thread and handle alloc there if
