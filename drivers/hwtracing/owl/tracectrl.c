@@ -83,11 +83,11 @@ struct tracectrl {
 	 * --> kthread-> task A. So if we keep track of the previously
 	 * scheduled user task (by pid?), we don't need to insert
 	 * duplicates. */
-	struct owl_sched_info sched_info[1024];
+	struct owl_sched_info sched_info[65536]; /* TODO: Dynamic allocation */
 	size_t used_sched_info_entries;
 	struct mutex sched_info_mutex;
 
-	struct owl_map_info maps[1024];
+	struct owl_map_info maps[4096]; /* TODO: Dynamic allocation */
 	size_t used_map_entries;
 	struct mutex map_info_mutex;
 
