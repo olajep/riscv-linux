@@ -85,9 +85,11 @@ struct tracectrl {
 	 * duplicates. */
 	struct owl_sched_info sched_info[1024];
 	size_t used_sched_info_entries;
+	struct mutex sched_info_mutex;
 
 	struct owl_map_info maps[1024];
 	size_t used_map_entries;
+	struct mutex map_info_mutex;
 
 	enum owl_trace_format trace_format;
 
@@ -343,10 +345,14 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 
 	status->stream_info_size = nr_cpu_ids * sizeof(struct owl_stream_info);
 	status->tracebuf_size = total_tracebuf_size(ctrl);
+	mutex_lock(&ctrl->sched_info_mutex);
 	status->sched_info_size =
 		ctrl->used_sched_info_entries * sizeof(struct owl_sched_info);
+	mutex_unlock(&ctrl->sched_info_mutex);
+	mutex_lock(&ctrl->map_info_mutex);
 	status->map_info_size =
 		ctrl->used_map_entries * sizeof(struct owl_map_info);
+	mutex_unlock(&ctrl->map_info_mutex);
 
 	return 0;
 }
@@ -800,14 +806,14 @@ static void tracectrl_sched_in(struct preempt_notifier *notifier, int cpu)
  * @ctrl:	tracectrl device
  * @task:	scheduled out task
  *
- * NB: ctrl->mutex must be held by the caller.
+ * NB: ctrl->sched_info_mutex must be held by the caller.
  */
 static void tracectrl_insert_sched_info(struct tracectrl *ctrl,
 				      struct task_struct *task)
-__must_hold(&ctrl->mutex)
+__must_hold(&ctrl->sched_info_mutex)
 {
 	struct owl_sched_info *entry;
-	if (ctrl->used_sched_info_entries >= ARRAY_SIZE(ctrl->sched_info))
+
 		return;
 
 	entry			= &ctrl->sched_info[ctrl->used_sched_info_entries];
@@ -830,12 +836,12 @@ static void tracectrl_sched_out(struct preempt_notifier *notifier,
 	struct tracectrl *ctrl =
 		container_of(notifier, struct tracectrl, preempt_notifier);
 
-	mutex_lock(&ctrl->mutex);
-	if (!ctrl->enabled)
+	mutex_lock(&ctrl->sched_info_mutex);
+	if (!ctrl->enabled) /* TODO: make enable atomic */
 		dev_warn(&ctrl->dev, "%s: device not enabled\n", __func__);
 
 	tracectrl_insert_sched_info(ctrl, current);
-	mutex_unlock(&ctrl->mutex);
+	mutex_unlock(&ctrl->sched_info_mutex);
 }
 
 static __read_mostly struct preempt_ops tracectrl_preempt_ops;
@@ -846,12 +852,12 @@ static __read_mostly struct preempt_ops tracectrl_preempt_ops;
  * @vma:	vm area
  * @task:	task the vma belongs to
  *
- * NB: ctrl->mutex must be held by the caller.
+ * NB: ctrl->map_info_mutex must be held by the caller.
  */
 static void tracectrl_insert_map(struct tracectrl *ctrl,
 				 struct vm_area_struct *vma,
 				 struct task_struct *task)
-__must_hold(&ctrl->mutex)
+__must_hold(&ctrl->map_info_mutex)
 {
 	struct owl_map_info *entry;
 	const char *path;
@@ -929,6 +935,7 @@ __must_hold(&ctrl->mutex)
 	ctrl->used_map_entries = 0;
 
 	read_lock(&tasklist_lock);
+	mutex_lock(&ctrl->map_info_mutex);
 	for_each_process(p) {
 		mm = p->mm;
 		if (!mm || p->flags & PF_KTHREAD)
@@ -938,6 +945,7 @@ __must_hold(&ctrl->mutex)
 			tracectrl_insert_map(ctrl, vma, p);
 		up_read(&mm->mmap_sem);
 	}
+	mutex_unlock(&ctrl->map_info_mutex);
 	read_unlock(&tasklist_lock);
 
 	mmap_notifier_inc();
@@ -951,9 +959,9 @@ static void tracectrl_mmap_event(struct mmap_notifier *notifier,
 	struct tracectrl *ctrl =
 		container_of(notifier, struct tracectrl, mmap_notifier);
 
-	mutex_lock(&ctrl->mutex);
+	mutex_lock(&ctrl->map_info_mutex);
 	tracectrl_insert_map(ctrl, vma, current);
-	mutex_unlock(&ctrl->mutex);
+	mutex_unlock(&ctrl->map_info_mutex);
 }
 
 static __read_mostly struct mmap_notifier_ops tracectrl_mmap_notifier_ops;
@@ -1050,6 +1058,8 @@ static int tracectrl_probe(struct platform_device *pdev)
 	}
 
 	mutex_init(&ctrl->mutex);
+	mutex_init(&ctrl->sched_info_mutex);
+	mutex_init(&ctrl->map_info_mutex);
 	spin_lock_init(&ctrl->lock);
 
 	res = sysfs_create_group(&pdev->dev.kobj, &tracectrl_attr_group);
