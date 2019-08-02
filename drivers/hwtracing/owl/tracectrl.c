@@ -234,7 +234,7 @@ union ioctl_arg {
 };
 
 /**
- * last_active_buffer_size - Get used size for last used buffer
+ * get_bufptr - Get buffer pointer for trace buffer
  * @ctrl:	tracectrl device
  * @cpu:	cpu
  * @buf:	buffer 0 or buffer 1
@@ -242,18 +242,25 @@ union ioctl_arg {
  * NB: ctrl->lock must be held by the caller. ctrl->enabled must NOT be
  * enabled.
  *
- * Return: The used area of the buffer
+ * Return: The used area of the buffer. Can never be more than ctrl->dma_size.
  */
-static u32 last_active_buffer_size(struct tracectrl *ctrl, unsigned int cpu,
-				   unsigned int buf)
+static u32 get_bufptr(struct tracectrl *ctrl, unsigned int cpu,
+		      unsigned int buf)
 __must_hold(&ctrl->lock)
 {
 	unsigned long reg;
-	u32 ptr;
+	u32 bufptr;
 
-	reg = TRACECTRL_BUFPTR_BASE + cpu + buf * 4;
-	ptr = tracectrl_reg_readl(ctrl, reg);
-	return ptr;
+	reg = TRACECTRL_BUFPTR_BASE + ((2 * cpu + buf) * 4);
+	bufptr = tracectrl_reg_readl(ctrl, reg);
+
+	if (bufptr > ctrl->dma_size) {
+		dev_warn(&ctrl->dev,
+			 "%s: bufptr beyond trace buffer. cpu=%u buf=%u bufptr=%u.",
+			 __func__, cpu, buf, bufptr);
+	}
+
+	return min_t(u32, ctrl->dma_size, bufptr);
 }
 
 /**
@@ -269,17 +276,21 @@ __must_hold(&ctrl->lock)
 static u32 cpu_unused_bufsize(struct tracectrl *ctrl, unsigned int cpu)
 __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
-	u32 s, unused = 0;
-	/* buf0 */
-	s = last_active_buffer_size(ctrl, cpu, 0);
-	if (s < ctrl->dma_size)
-		unused += ctrl->dma_size - s;
-	/* buf1 */
-	s = last_active_buffer_size(ctrl, cpu, 1);
-	if (s < ctrl->dma_size)
-		unused += ctrl->dma_size - s;
+	u32 b0ptr, b1ptr;
+	bool b0active, b1active;
 
-	return unused;
+	b0ptr = get_bufptr(ctrl, cpu, 0);
+	b1ptr = get_bufptr(ctrl, cpu, 1);
+
+	b0active = b0ptr && b0ptr != ctrl->dma_size;
+	b1active = b1ptr && b1ptr != ctrl->dma_size;
+	if (b0active && b1active) {
+		dev_warn(&ctrl->dev,
+			 "%s: cpu=%u: Both buffers detected as active. This should never happen.\n",
+			 __func__, cpu);
+	}
+
+	return 2 * ctrl->dma_size - (b0ptr + b1ptr);
 }
 
 /**
@@ -541,6 +552,7 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 			n++;
 	}
 	size = n * ctrl->dma_size;
+
 	if (!ctrl->enabled) {
 		unused = cpu_unused_bufsize(ctrl, cpu);
 		if (unused <= size) {
@@ -561,15 +573,19 @@ static struct tracectrl_dma_buf *cpu_last_used_dmabuf(struct tracectrl *ctrl,
 __must_hold(&ctrl->lock)
 {
 	struct tracectrl_dma_buf *buf = NULL;
-	size_t i, size, unused_bufs = 0;
+	size_t i, unused_bufs = 0;
+	u32 b0ptr, b1ptr;
+	bool b0active, b1active;
 
 	if (!ctrl->used_dma_bufs)
 		return NULL;
 
-	/* check buf0 and buf1 */
-	if (last_active_buffer_size(ctrl, cpu, 0) == 0)
+	b0ptr = get_bufptr(ctrl, cpu, 0);
+	b1ptr = get_bufptr(ctrl, cpu, 1);
+
+	if (b0ptr == 0)
 		unused_bufs++;
-	if (last_active_buffer_size(ctrl, cpu, 1) == 0)
+	if (b1ptr == 0)
 		unused_bufs++;
 
 	if (unused_bufs == 2) {
@@ -577,8 +593,15 @@ __must_hold(&ctrl->lock)
 			*last_size = 0;
 		return NULL;
 	}
-	if (unused_bufs == 0)
-		dev_warn(&ctrl->dev, "%s: both buffers used\n", __func__);
+
+	b0active = b0ptr && b0ptr != ctrl->dma_size;
+	b1active = b1ptr && b1ptr != ctrl->dma_size;
+
+	if (b0active && b1active) {
+		dev_err(&ctrl->dev,
+			"%s: cpu=%u: Both buffers detected as active. This should never happen.\n",
+			__func__, cpu);
+	}
 
 	for (i = ctrl->used_dma_bufs; i > 0; i--) {
 		if (ctrl->dma_bufs[i - 1].cpu != cpu)
@@ -593,12 +616,8 @@ __must_hold(&ctrl->lock)
 	if (!buf)
 		return NULL;
 
-	if (last_size) {
-		size = last_active_buffer_size(ctrl, cpu, 0);
-		if (!size)
-			size = last_active_buffer_size(ctrl, cpu, 1);
-		*last_size = size;
-	}
+	if (last_size)
+		*last_size = b0active ? b0ptr : b1ptr;
 	return buf;
 }
 
@@ -655,8 +674,14 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 			if (ctrl->dma_bufs[i].cpu != cpu)
 				continue;
 			n = min(remaining, ctrl->dma_size);
-			if (&ctrl->dma_bufs[i] == last_buf)
+			if (&ctrl->dma_bufs[i] == last_buf) {
+				if (n < last_size) {
+					dev_dbg(&ctrl->dev,
+						"%s: unexpected size of last buffer\n",
+						__func__);
+				}
 				n = min(n, last_size);
+			}
 			dev_dbg(&ctrl->dev,
 				"%s: n=%lu cpu=%u buf->cpu=%u i=%lu\n",
 				__func__, n, cpu, ctrl->dma_bufs[i].cpu, i);
