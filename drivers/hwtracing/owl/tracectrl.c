@@ -814,7 +814,10 @@ __must_hold(&ctrl->sched_info_mutex)
 {
 	struct owl_sched_info *entry;
 
+	if (ctrl->used_sched_info_entries >= ARRAY_SIZE(ctrl->sched_info)) {
+		dev_info(&ctrl->dev, "%s: buffer full\n", __func__);
 		return;
+	}
 
 	entry			= &ctrl->sched_info[ctrl->used_sched_info_entries];
 	memset(entry, 0, sizeof(*entry));
@@ -872,8 +875,10 @@ __must_hold(&ctrl->map_info_mutex)
 		return;
 	}
 
-	if (ctrl->used_map_entries >= ARRAY_SIZE(ctrl->maps))
+	if (ctrl->used_map_entries >= ARRAY_SIZE(ctrl->maps)) {
+		dev_info(&ctrl->dev, "%s: map info buffer full\n", __func__);
 		return;
+	}
 
 	entry = &ctrl->maps[ctrl->used_map_entries];
 	entry->pid	= task->pid;
