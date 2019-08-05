@@ -479,6 +479,7 @@ static int ioctl_enable(struct tracectrl *ctrl,
 __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
 	u32 val;
+	unsigned int cpu;
 
 	struct tracectrl_dma_buf *buf0, *buf1;
 
@@ -487,17 +488,16 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 
 	tracectrl_free_all_dma_bufs(ctrl);
 
-	/* TODO: for each cpu do ... { */
-	buf0 = tracectrl_dma_buf_alloc(ctrl, 0, GFP_KERNEL);
-	buf1 = tracectrl_dma_buf_alloc(ctrl, 0, GFP_KERNEL);
-	if (!buf0 || !buf1) {
-		tracectrl_free_all_dma_bufs(ctrl);
-		return -ENOMEM;
+	for_each_possible_cpu(cpu) {
+		buf0 = tracectrl_dma_buf_alloc(ctrl, cpu, GFP_KERNEL);
+		buf1 = tracectrl_dma_buf_alloc(ctrl, cpu, GFP_KERNEL);
+		if (!buf0 || !buf1) {
+			tracectrl_free_all_dma_bufs(ctrl);
+			return -ENOMEM;
+		}
+		tracectrl_update_buf(ctrl, 2 * cpu + 0, buf0->handle, true);
+		tracectrl_update_buf(ctrl, 2 * cpu + 1, buf1->handle, true);
 	}
-
-	tracectrl_update_buf(ctrl, 0, buf0->handle, true);
-	tracectrl_update_buf(ctrl, 1, buf1->handle, true);
-	/* TODO: for each cpu do ... } */
 
 	tracectrl_init_map_info(ctrl);
 	ctrl->used_sched_info_entries = 0;
