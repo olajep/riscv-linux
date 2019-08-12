@@ -85,7 +85,7 @@ struct tracectrl {
 	 * duplicates. */
 	struct owl_sched_info sched_info[65536]; /* TODO: Dynamic allocation */
 	size_t used_sched_info_entries;
-	struct mutex sched_info_mutex;
+	spinlock_t sched_info_lock;
 
 	struct owl_map_info maps[4096]; /* TODO: Dynamic allocation */
 	size_t used_map_entries;
@@ -340,15 +340,16 @@ static int ioctl_get_status(struct tracectrl *ctrl, union ioctl_arg *arg)
 __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
 	struct owl_status *status = &arg->status;
+	unsigned long flags;
 
 	status->enabled = ctrl->enabled;
 
 	status->stream_info_size = nr_cpu_ids * sizeof(struct owl_stream_info);
 	status->tracebuf_size = total_tracebuf_size(ctrl);
-	mutex_lock(&ctrl->sched_info_mutex);
+	spin_lock_irqsave(&ctrl->sched_info_lock, flags);
 	status->sched_info_size =
 		ctrl->used_sched_info_entries * sizeof(struct owl_sched_info);
-	mutex_unlock(&ctrl->sched_info_mutex);
+	spin_unlock_irqrestore(&ctrl->sched_info_lock, flags);
 	mutex_lock(&ctrl->map_info_mutex);
 	status->map_info_size =
 		ctrl->used_map_entries * sizeof(struct owl_map_info);
@@ -806,11 +807,11 @@ static void tracectrl_sched_in(struct preempt_notifier *notifier, int cpu)
  * @ctrl:	tracectrl device
  * @task:	scheduled out task
  *
- * NB: ctrl->sched_info_mutex must be held by the caller.
+ * NB: ctrl->sched_info_lock must be held by the caller.
  */
 static void tracectrl_insert_sched_info(struct tracectrl *ctrl,
 				      struct task_struct *task)
-__must_hold(&ctrl->sched_info_mutex)
+__must_hold(&ctrl->sched_info_lock)
 {
 	struct owl_sched_info *entry;
 
@@ -838,13 +839,14 @@ static void tracectrl_sched_out(struct preempt_notifier *notifier,
 {
 	struct tracectrl *ctrl =
 		container_of(notifier, struct tracectrl, preempt_notifier);
+	unsigned long flags;
 
-	mutex_lock(&ctrl->sched_info_mutex);
+	spin_lock_irqsave(&ctrl->sched_info_lock, flags);
 	if (!ctrl->enabled) /* TODO: make enable atomic */
 		dev_warn(&ctrl->dev, "%s: device not enabled\n", __func__);
 
 	tracectrl_insert_sched_info(ctrl, current);
-	mutex_unlock(&ctrl->sched_info_mutex);
+	spin_unlock_irqrestore(&ctrl->sched_info_lock, flags);
 }
 
 static __read_mostly struct preempt_ops tracectrl_preempt_ops;
@@ -1063,7 +1065,7 @@ static int tracectrl_probe(struct platform_device *pdev)
 	}
 
 	mutex_init(&ctrl->mutex);
-	mutex_init(&ctrl->sched_info_mutex);
+	spin_lock_init(&ctrl->sched_info_lock);
 	mutex_init(&ctrl->map_info_mutex);
 	spin_lock_init(&ctrl->lock);
 
