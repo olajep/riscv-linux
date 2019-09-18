@@ -1077,15 +1077,14 @@ static int tracectrl_probe(struct platform_device *pdev)
 		return res;
 	}
 
-	/* This creates the minor number for the RPMB char device */
+	/* This creates the minor number for the tracectrl char device */
 	res = ida_simple_get(&tracectrl_ida, 0, MAX_DEVICES, GFP_KERNEL);
 	if (res < 0) {
 		dev_err(&pdev->dev,
-			"%s: can't register sysfs attr group: %d\n",
+			"%s: can't get minor device number: %d\n",
 			__func__, res);
 		goto out_sysfs_remove;
 	}
-
 	ctrl->minor = res;
 	devt = MKDEV(MAJOR(tracectrl_devt), ctrl->minor);
 	cdev_init(&ctrl->cdev, &tracectrl_fops);
