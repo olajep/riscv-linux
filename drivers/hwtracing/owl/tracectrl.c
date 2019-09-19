@@ -64,6 +64,14 @@ struct tracectrl_dma_buf {
 	unsigned int cpu;
 };
 
+#define SZ_SCHED_INFO_PER_PAGE (PAGE_SIZE - sizeof(struct list_head))
+#define N_SCHED_INFO_PER_PAGE  (SZ_SCHED_INFO_PER_PAGE / \
+				sizeof(struct owl_sched_info))
+struct sched_info_page {
+	struct list_head	list;
+	struct owl_sched_info	sched_info[N_SCHED_INFO_PER_PAGE];
+};
+
 struct tracectrl {
 	bool enabled;
 	void __iomem *base_addr;
@@ -83,7 +91,7 @@ struct tracectrl {
 	 * --> kthread-> task A. So if we keep track of the previously
 	 * scheduled user task (by pid?), we don't need to insert
 	 * duplicates. */
-	struct owl_sched_info sched_info[65536]; /* TODO: Dynamic allocation */
+	struct list_head sched_info_pages;
 	size_t used_sched_info_entries;
 	spinlock_t sched_info_lock;
 
@@ -474,6 +482,7 @@ __must_hold(&ctrl->lock)
 }
 
 void tracectrl_init_map_info(struct tracectrl *ctrl);
+static void tracectrl_clear_sched_info(struct tracectrl *ctrl);
 
 static int ioctl_enable(struct tracectrl *ctrl,
 			union ioctl_arg __always_unused *arg)
@@ -501,7 +510,7 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 	}
 
 	tracectrl_init_map_info(ctrl);
-	ctrl->used_sched_info_entries = 0;
+	tracectrl_clear_sched_info(ctrl);
 	preempt_notifier_inc();
 	preempt_notifier_all_register(&ctrl->preempt_notifier);
 
@@ -632,11 +641,12 @@ static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
 	size_t i, remaining, n, last_size;
-	struct owl_trace_header *header = &arg->trace_header;
 	u8 __user *p;
 	unsigned int cpu;
-	struct owl_stream_info si = { 0 };
 	struct tracectrl_dma_buf *last_buf;
+	struct sched_info_page *page;
+	struct owl_trace_header *header = &arg->trace_header;
+	struct owl_stream_info si = { 0 };
 
 	if (ctrl->enabled)
 		return -EBUSY;
@@ -707,12 +717,22 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 	}
 
 	/* Copy scheduling info */
-	n = min_t(u64, header->max_sched_info_size,
-		  ctrl->used_sched_info_entries *
-			sizeof(struct owl_sched_info));
-	if (copy_to_user(header->schedinfobuf, ctrl->sched_info, n))
-		return -EFAULT;
-	header->sched_info_size = n;
+	p = header->schedinfobuf;
+	remaining = min_t(u64, header->max_sched_info_size,
+			  ctrl->used_sched_info_entries *
+				sizeof(struct owl_sched_info));
+	remaining -= remaining % sizeof(struct owl_sched_info);
+	/* Entries inserted in stack fashion so walk the list in reverse */
+	list_for_each_entry_reverse(page, &ctrl->sched_info_pages, list) {
+		n = min(remaining, SZ_SCHED_INFO_PER_PAGE);
+		if (copy_to_user(p, page->sched_info, n))
+			return -EFAULT;
+		remaining -= n;
+		p += n;
+		header->sched_info_size += n;
+		if (!remaining)
+			break;
+	}
 
 	/* Copy mapping info */
 	n = min_t(u64, header->max_map_info_size,
@@ -813,14 +833,30 @@ static void tracectrl_insert_sched_info(struct tracectrl *ctrl,
 				      struct task_struct *task)
 __must_hold(&ctrl->sched_info_lock)
 {
+	struct sched_info_page *page;
 	struct owl_sched_info *entry;
+	const unsigned long offs =
+		ctrl->used_sched_info_entries % N_SCHED_INFO_PER_PAGE;
 
-	if (ctrl->used_sched_info_entries >= ARRAY_SIZE(ctrl->sched_info)) {
-		dev_info(&ctrl->dev, "%s: buffer full\n", __func__);
-		return;
+	if (offs == 0) {
+		/* Spin lock is held so we need to be atomic??
+		 * Use a mutex instead ???
+		 * But we can't have any scheduling events here, that would
+		 * distort the trace */
+		page = (struct sched_info_page *) __get_free_page(GFP_ATOMIC);
+		if (!page) {
+			dev_err(&ctrl->dev, "%s: could not alloc\n", __func__);
+			return;
+		}
+		/* Insert at the head. */
+		list_add(&page->list, &ctrl->sched_info_pages);
+	} else {
+		page = list_first_entry(&ctrl->sched_info_pages,
+					struct sched_info_page,
+					list);
 	}
 
-	entry			= &ctrl->sched_info[ctrl->used_sched_info_entries];
+	entry			= &page->sched_info[offs];
 	memset(entry, 0, sizeof(*entry));
 	entry->timestamp	= get_timestamp();
 	entry->cpu		= (u16) smp_processor_id();
@@ -959,6 +995,27 @@ __must_hold(&ctrl->mutex)
 	mmap_notifier_register(&ctrl->mmap_notifier);
 }
 
+/**
+ * tracectrl_clear_sched_info - Initialize tracectrl sched info
+ * @ctrl:	tracectrl device
+ *
+ * NB: ctrl->mutex should be held when calling this function
+ *
+ * Return: void
+ */
+static void tracectrl_clear_sched_info(struct tracectrl *ctrl)
+__must_hold(&ctrl->mutex)
+{
+	struct sched_info_page *page, *next;
+	list_for_each_entry_safe(page, next, &ctrl->sched_info_pages, list) {
+		list_del(&page->list);
+		free_page((unsigned long) page);
+	}
+	if (!list_empty(&ctrl->sched_info_pages)) {
+		dev_info(&ctrl->dev, "%s: list not empty!\n", __func__);
+	}
+	ctrl->used_sched_info_entries = 0;
+}
 
 static void tracectrl_mmap_event(struct mmap_notifier *notifier,
 				 struct vm_area_struct *vma)
@@ -1068,6 +1125,7 @@ static int tracectrl_probe(struct platform_device *pdev)
 	spin_lock_init(&ctrl->sched_info_lock);
 	mutex_init(&ctrl->map_info_mutex);
 	spin_lock_init(&ctrl->lock);
+	INIT_LIST_HEAD(&ctrl->sched_info_pages);
 
 	res = sysfs_create_group(&pdev->dev.kobj, &tracectrl_attr_group);
 	if (res < 0) {
