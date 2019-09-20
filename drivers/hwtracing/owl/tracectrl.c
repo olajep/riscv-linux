@@ -204,29 +204,9 @@ static ssize_t bufptr1_show(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RO(bufptr1);
 
-/* TODO: Remove */
-static ssize_t dump_show(struct device *dev, struct device_attribute *attr,
-			 char *buf)
-{
-	ssize_t n;
-	struct tracectrl *ctrl = dev_get_drvdata(dev);
-
-	if (!ctrl->used_dma_bufs)
-		return 0;
-
-	dma_sync_single_for_cpu(dev, ctrl->dma_bufs[0].handle, ctrl->dma_size,
-				DMA_FROM_DEVICE);
-	n = min(ctrl->dma_size, PAGE_SIZE - 8);
-	memcpy(buf, ctrl->dma_bufs[0].buf, n);
-
-	return n;
-}
-static DEVICE_ATTR_RO(dump);
-
 static struct attribute *tracectrl_attrs[] = {
 	&dev_attr_config.attr,
 	&dev_attr_status.attr,
-	&dev_attr_dump.attr,
 	&dev_attr_bufptr0.attr,
 	&dev_attr_bufptr1.attr,
 	NULL,
