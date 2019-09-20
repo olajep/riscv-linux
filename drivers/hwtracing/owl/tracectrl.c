@@ -64,12 +64,24 @@ struct tracectrl_dma_buf {
 	unsigned int cpu;
 };
 
-#define SZ_SCHED_INFO_PER_PAGE (PAGE_SIZE - sizeof(struct list_head))
-#define N_SCHED_INFO_PER_PAGE  (SZ_SCHED_INFO_PER_PAGE / \
-				sizeof(struct owl_sched_info))
-struct sched_info_page {
+#define PAYLOAD_PER_PAGE	(PAGE_SIZE - sizeof(struct list_head))
+#define N_PER_PAGE(t)		(PAYLOAD_PER_PAGE / sizeof(t))
+#define SZ_PER_PAGE(t)		(sizeof(t) * N_PER_PAGE(t))
+
+#define N_DMA_BUFS_PER_PAGE	N_PER_PAGE(struct tracectrl_dma_buf)
+#define SZ_DMA_BUFS_PER_PAGE	SZ_PER_PAGE(struct tracectrl_dma_buf)
+#define N_SCHED_INFO_PER_PAGE	N_PER_PAGE(struct owl_sched_info)
+#define SZ_SCHED_INFO_PER_PAGE	SZ_PER_PAGE(struct owl_sched_info)
+#define N_MAP_INFO_PER_PAGE	N_PER_PAGE(struct owl_map_info)
+#define SZ_MAP_INFO_PER_PAGE	SZ_PER_PAGE(struct owl_map_info)
+
+struct tracectrl_page {
 	struct list_head	list;
-	struct owl_sched_info	sched_info[N_SCHED_INFO_PER_PAGE];
+	union {
+		struct tracectrl_dma_buf dma_bufs[N_DMA_BUFS_PER_PAGE];
+		struct owl_sched_info	 sched_info[N_SCHED_INFO_PER_PAGE];
+		struct owl_map_info	 map_info[N_MAP_INFO_PER_PAGE];
+	};
 };
 
 struct tracectrl {
@@ -84,7 +96,7 @@ struct tracectrl {
 
 	size_t dma_size;
 	struct dma_pool *dma_pool;
-	struct tracectrl_dma_buf dma_bufs[1024];
+	struct list_head dma_buf_pages;
 	size_t used_dma_bufs;
 
 	/* TODO: Optimize this. In many cases we the scheduler will do task A
@@ -95,8 +107,8 @@ struct tracectrl {
 	size_t used_sched_info_entries;
 	spinlock_t sched_info_lock;
 
-	struct owl_map_info maps[4096]; /* TODO: Dynamic allocation */
-	size_t used_map_entries;
+	struct list_head map_info_pages;
+	size_t used_map_info_entries;
 	struct mutex map_info_mutex;
 
 	enum owl_trace_format trace_format;
@@ -340,7 +352,7 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 	spin_unlock_irqrestore(&ctrl->sched_info_lock, flags);
 	mutex_lock(&ctrl->map_info_mutex);
 	status->map_info_size =
-		ctrl->used_map_entries * sizeof(struct owl_map_info);
+		ctrl->used_map_info_entries * sizeof(struct owl_map_info);
 	mutex_unlock(&ctrl->map_info_mutex);
 
 	return 0;
@@ -419,13 +431,29 @@ __must_hold(&ctrl->lock)
 static void tracectrl_free_all_dma_bufs(struct tracectrl *ctrl)
 __must_hold(&ctrl->lock)
 {
+	struct tracectrl_page *page, *next;
 	struct tracectrl_dma_buf *buf;
+	size_t i, n;
+	size_t remaining = ctrl->used_dma_bufs;
 
-	while (ctrl->used_dma_bufs) {
-		ctrl->used_dma_bufs--;
-		buf = &ctrl->dma_bufs[ctrl->used_dma_bufs];
-		dma_pool_free(ctrl->dma_pool, buf->buf, buf->handle);
+	/* Entries inserted in stack fashion so walk the list in reverse */
+	list_for_each_entry_safe_reverse(page, next, &ctrl->dma_buf_pages,
+					 list) {
+		n = min(remaining, N_DMA_BUFS_PER_PAGE);
+		for (i = 0; i < n; i++) {
+			ctrl->used_dma_bufs--;
+			buf = &page->dma_bufs[i];
+			if (buf->buf) {
+				dma_pool_free(ctrl->dma_pool,
+					      buf->buf,
+					      buf->handle);
+			}
+		}
+		list_del(&page->list);
+		free_page((unsigned long) page);
 	}
+	WARN_ON(!list_empty(&ctrl->dma_buf_pages));
+	WARN_ON(ctrl->used_dma_bufs != 0);
 }
 
 /**
@@ -436,32 +464,51 @@ __must_hold(&ctrl->lock)
  *
  * NB: ctrl->lock should be held when calling this function
  *
- * Return: void
+ * Return: Pointer to a new DMA buffer
  */
 static struct tracectrl_dma_buf *
 tracectrl_dma_buf_alloc(struct tracectrl *ctrl, unsigned long cpu,
 			gfp_t gfp_flags)
 __must_hold(&ctrl->lock)
 {
+	struct tracectrl_page *page;
 	struct tracectrl_dma_buf *buf;
+	const unsigned long offs =
+		ctrl->used_dma_bufs % N_DMA_BUFS_PER_PAGE;
 
-	if (ctrl->used_dma_bufs >= ARRAY_SIZE(ctrl->dma_bufs))
-		return NULL;
+	if (offs == 0) {
+		page = (struct tracectrl_page *) __get_free_page(gfp_flags);
+		if (!page) {
+			dev_err(&ctrl->dev, "%s: could not alloc\n", __func__);
+			return NULL;
+		}
+		/* Insert at the head. */
+		list_add(&page->list, &ctrl->dma_buf_pages);
+	} else {
+		page = list_first_entry(&ctrl->dma_buf_pages,
+					struct tracectrl_page,
+					list);
+	}
+	ctrl->used_dma_bufs++;
 
-	buf = &ctrl->dma_bufs[ctrl->used_dma_bufs];
+	buf	 = &page->dma_bufs[offs];
 	buf->cpu = (unsigned int) cpu;
+	buf->buf = dma_pool_alloc(ctrl->dma_pool, gfp_flags, &buf->handle);
 
-	/* TODO: Revisit when H/W gets buffer pointer. Then there's no need
-	 * to use zero allocated buffers. */
-	buf->buf = dma_pool_zalloc(ctrl->dma_pool, gfp_flags, &buf->handle);
-
-	if (buf->buf)
-		ctrl->used_dma_bufs++;
-
+	if (!buf->buf) {
+		/* Need to unroll if call to dma_pool_alloc fails */
+		if (offs == 0) {
+			list_del(&page->list);
+			free_page((unsigned long) page);
+		}
+		ctrl->used_dma_bufs--;
+		return NULL;
+	}
 	return buf;
 }
 
-void tracectrl_init_map_info(struct tracectrl *ctrl);
+static void tracectrl_clear_map_info(struct tracectrl *ctrl);
+static void tracectrl_init_map_info(struct tracectrl *ctrl);
 static void tracectrl_clear_sched_info(struct tracectrl *ctrl);
 
 static int ioctl_enable(struct tracectrl *ctrl,
@@ -489,6 +536,7 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 		tracectrl_update_buf(ctrl, 2 * cpu + 1, buf1->handle, true);
 	}
 
+	tracectrl_clear_map_info(ctrl);
 	tracectrl_init_map_info(ctrl);
 	tracectrl_clear_sched_info(ctrl);
 	preempt_notifier_inc();
@@ -542,10 +590,17 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 static size_t cpu_trace_stream_size(struct tracectrl *ctrl, unsigned int cpu)
 __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
-	size_t i, size, unused, n = 0;
-	for (i = 0; i < ctrl->used_dma_bufs; i++) {
-		if (ctrl->dma_bufs[i].cpu == cpu)
-			n++;
+	size_t i, size, unused, offs, n = 0;
+	struct tracectrl_page *page;
+
+	i = 0;
+	list_for_each_entry_reverse(page, &ctrl->dma_buf_pages, list) {
+		for (offs = 0;
+		     i < ctrl->used_dma_bufs && offs < N_DMA_BUFS_PER_PAGE;
+		     i++, offs++) {
+			if (page->dma_bufs[offs].cpu == cpu)
+				n++;
+		}
 	}
 	size = n * ctrl->dma_size;
 
@@ -568,8 +623,9 @@ static struct tracectrl_dma_buf *cpu_last_used_dmabuf(struct tracectrl *ctrl,
 						      size_t *last_size)
 __must_hold(&ctrl->lock)
 {
-	struct tracectrl_dma_buf *buf = NULL;
-	size_t i, unused_bufs = 0;
+	struct tracectrl_dma_buf *buf, *ret = NULL;
+	struct tracectrl_page *page;
+	size_t i, offs, unused_bufs = 0;
 	u32 b0ptr, b1ptr;
 	bool b0active, b1active;
 
@@ -599,32 +655,43 @@ __must_hold(&ctrl->lock)
 			__func__, cpu);
 	}
 
-	for (i = ctrl->used_dma_bufs; i > 0; i--) {
-		if (ctrl->dma_bufs[i - 1].cpu != cpu)
-			continue;
-		if (unused_bufs) {
-			unused_bufs--;
-			continue;
+	i = ctrl->used_dma_bufs;
+	list_for_each_entry(page, &ctrl->dma_buf_pages, list) {
+		while (true) {
+			offs = (i - 1) % N_DMA_BUFS_PER_PAGE;
+			i--;
+			if (i == 0)
+				goto done;
+			if (offs == 0)
+				continue;
+			buf = &page->dma_bufs[offs];
+			if (buf->cpu != cpu)
+				continue;
+			if (unused_bufs) {
+				unused_bufs--;
+				continue;
+			}
+			ret = buf;
+			goto done;
 		}
-		buf = &ctrl->dma_bufs[i - 1];
-		break;
 	}
-	if (!buf)
+done:
+	if (!ret)
 		return NULL;
 
 	if (last_size)
 		*last_size = b0active ? b0ptr : b1ptr;
-	return buf;
+	return ret;
 }
 
 static int ioctl_dump_trace(struct tracectrl *ctrl, union ioctl_arg *arg)
 __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 {
-	size_t i, remaining, n, last_size;
+	size_t i, remaining, n, last_size, offs;
 	u8 __user *p;
 	unsigned int cpu;
-	struct tracectrl_dma_buf *last_buf;
-	struct sched_info_page *page;
+	struct tracectrl_dma_buf *last_buf, *dma_buf;
+	struct tracectrl_page *page;
 	struct owl_trace_header *header = &arg->trace_header;
 	struct owl_stream_info si = { 0 };
 
@@ -667,32 +734,38 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 		last_buf = cpu_last_used_dmabuf(ctrl, cpu, &last_size);
 		if (!last_buf)
 			continue;
-		for (i = 0; i < ctrl->used_dma_bufs && remaining; i++) {
-			if (ctrl->dma_bufs[i].cpu != cpu)
-				continue;
-			n = min(remaining, ctrl->dma_size);
-			if (&ctrl->dma_bufs[i] == last_buf) {
-				if (n < last_size) {
-					dev_dbg(&ctrl->dev,
-						"%s: unexpected size of last buffer\n",
-						__func__);
+		i = 0;
+		list_for_each_entry_reverse(page, &ctrl->dma_buf_pages, list) {
+			for (offs = 0;
+			     offs < N_DMA_BUFS_PER_PAGE &&
+			     i < ctrl->used_dma_bufs && remaining;
+			     i++, offs++) {
+				dma_buf = &page->dma_bufs[offs];
+				if (dma_buf->cpu != cpu)
+					continue;
+				n = min(remaining, ctrl->dma_size);
+				if (dma_buf == last_buf) {
+					if (n < last_size) {
+						dev_dbg(&ctrl->dev,
+							"%s: unexpected size of last buffer\n",
+							__func__);
+					}
+					n = min(n, last_size);
 				}
-				n = min(n, last_size);
+				dev_dbg(&ctrl->dev,
+					"%s: n=%lu cpu=%u buf->cpu=%u i=%lu\n",
+					__func__, n, cpu, dma_buf->cpu, i);
+				dma_sync_single_for_cpu(&ctrl->dev,
+							dma_buf->handle, n,
+							DMA_FROM_DEVICE);
+				if (copy_to_user(p, dma_buf->buf, n))
+					return -EFAULT;
+				header->tracebuf_size += n;
+				p += n;
+				remaining -= n;
+				if (dma_buf == last_buf)
+					break;
 			}
-			dev_dbg(&ctrl->dev,
-				"%s: n=%lu cpu=%u buf->cpu=%u i=%lu\n",
-				__func__, n, cpu, ctrl->dma_bufs[i].cpu, i);
-			dma_sync_single_for_cpu(&ctrl->dev,
-						ctrl->dma_bufs[i].handle,
-						n,
-						DMA_FROM_DEVICE);
-			if (copy_to_user(p, ctrl->dma_bufs[i].buf, n))
-				return -EFAULT;
-			header->tracebuf_size += n;
-			p += n;
-			remaining -= n;
-			if (&ctrl->dma_bufs[i] == last_buf)
-				break;
 		}
 	}
 
@@ -715,11 +788,22 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 	}
 
 	/* Copy mapping info */
-	n = min_t(u64, header->max_map_info_size,
-		  ctrl->used_map_entries * sizeof(struct owl_map_info));
-	if (copy_to_user(header->mapinfobuf, ctrl->maps, n))
-		return -EFAULT;
-	header->map_info_size = n;
+	p = header->mapinfobuf;
+	remaining = min_t(u64, header->max_map_info_size,
+			  ctrl->used_map_info_entries *
+				sizeof(struct owl_map_info));
+	remaining -= remaining % sizeof(struct owl_map_info);
+	/* Entries inserted in stack fashion so walk the list in reverse */
+	list_for_each_entry_reverse(page, &ctrl->map_info_pages, list) {
+		n = min(remaining, SZ_MAP_INFO_PER_PAGE);
+		if (copy_to_user(p, page->map_info, n))
+			return -EFAULT;
+		remaining -= n;
+		p += n;
+		header->map_info_size += n;
+		if (!remaining)
+			break;
+	}
 
 	return 0;
 }
@@ -813,7 +897,7 @@ static void tracectrl_insert_sched_info(struct tracectrl *ctrl,
 				      struct task_struct *task)
 __must_hold(&ctrl->sched_info_lock)
 {
-	struct sched_info_page *page;
+	struct tracectrl_page *page;
 	struct owl_sched_info *entry;
 	const unsigned long offs =
 		ctrl->used_sched_info_entries % N_SCHED_INFO_PER_PAGE;
@@ -823,7 +907,7 @@ __must_hold(&ctrl->sched_info_lock)
 		 * Use a mutex instead ???
 		 * But we can't have any scheduling events here, that would
 		 * distort the trace */
-		page = (struct sched_info_page *) __get_free_page(GFP_ATOMIC);
+		page = (struct tracectrl_page *) __get_free_page(GFP_ATOMIC);
 		if (!page) {
 			dev_err(&ctrl->dev, "%s: could not alloc\n", __func__);
 			return;
@@ -832,9 +916,10 @@ __must_hold(&ctrl->sched_info_lock)
 		list_add(&page->list, &ctrl->sched_info_pages);
 	} else {
 		page = list_first_entry(&ctrl->sched_info_pages,
-					struct sched_info_page,
+					struct tracectrl_page,
 					list);
 	}
+	ctrl->used_sched_info_entries++;
 
 	entry			= &page->sched_info[offs];
 	memset(entry, 0, sizeof(*entry));
@@ -846,8 +931,6 @@ __must_hold(&ctrl->sched_info_lock)
 	entry->task.pid		= (int) task_pid_nr(task);
 	entry->task.ppid	= (int) task_ppid_nr(task);
 	strncpy(entry->task.comm, task->comm, TASK_COMM_LEN);
-
-	ctrl->used_sched_info_entries++;
 }
 
 static void tracectrl_sched_out(struct preempt_notifier *notifier,
@@ -872,18 +955,23 @@ static __read_mostly struct preempt_ops tracectrl_preempt_ops;
  * @ctrl:	tracectrl device
  * @vma:	vm area
  * @task:	task the vma belongs to
+ * @gfp_flags:	allocation flags
  *
  * NB: ctrl->map_info_mutex must be held by the caller.
  */
 static void tracectrl_insert_map(struct tracectrl *ctrl,
 				 struct vm_area_struct *vma,
-				 struct task_struct *task)
+				 struct task_struct *task,
+				 int gfp_flags)
 __must_hold(&ctrl->map_info_mutex)
 {
+	struct tracectrl_page *page;
 	struct owl_map_info *entry;
 	const char *path;
-	char static_buf[ARRAY_SIZE(entry->path)], *buf = NULL;
 	size_t len;
+	char static_buf[ARRAY_SIZE(entry->path)], *buf = NULL;
+	const unsigned long offs =
+		ctrl->used_map_info_entries % N_MAP_INFO_PER_PAGE;
 
 	if (!(vma->vm_flags & VM_EXEC))
 		return;
@@ -893,12 +981,22 @@ __must_hold(&ctrl->map_info_mutex)
 		return;
 	}
 
-	if (ctrl->used_map_entries >= ARRAY_SIZE(ctrl->maps)) {
-		dev_info(&ctrl->dev, "%s: map info buffer full\n", __func__);
-		return;
+	if (offs == 0) {
+		page = (struct tracectrl_page *) __get_free_page(gfp_flags);
+		if (!page) {
+			dev_err(&ctrl->dev, "%s: could not alloc\n", __func__);
+			return;
+		}
+		/* Insert at the head. */
+		list_add(&page->list, &ctrl->map_info_pages);
+	} else {
+		page = list_first_entry(&ctrl->map_info_pages,
+					struct tracectrl_page,
+					list);
 	}
+	ctrl->used_map_info_entries++;
 
-	entry = &ctrl->maps[ctrl->used_map_entries];
+	entry		= &page->map_info[offs];
 	entry->pid	= task->pid;
 	entry->vm_start	= (u64) vma->vm_start;
 	entry->vm_end	= (u64) vma->vm_end;
@@ -934,10 +1032,30 @@ got_path:
 	strlcpy(entry->path, path, ARRAY_SIZE(entry->path));
 	if (buf)
 		kfree(buf);
+}
 
-	ctrl->used_map_entries++;
-	if (ctrl->used_map_entries == ARRAY_SIZE(ctrl->maps))
-		dev_dbg(&ctrl->dev, "%s: map info full\n", __func__);
+/**
+ * tracectrl_clear_map_info - Clear tracectrl map info
+ * @ctrl:	tracectrl device
+ *
+ * NB: ctrl->mutex should be held when calling this function
+ *
+ * Return: void
+ */
+static void tracectrl_clear_map_info(struct tracectrl *ctrl)
+__must_hold(&ctrl->mutex)
+{
+	struct tracectrl_page *page, *next;
+	mutex_lock(&ctrl->map_info_mutex);
+	list_for_each_entry_safe(page, next, &ctrl->map_info_pages, list) {
+		list_del(&page->list);
+		free_page((unsigned long) page);
+	}
+	if (!list_empty(&ctrl->map_info_pages)) {
+		dev_err(&ctrl->dev, "%s: list not empty!\n", __func__);
+	}
+	ctrl->used_map_info_entries = 0;
+	mutex_unlock(&ctrl->map_info_mutex);
 }
 
 /**
@@ -948,14 +1066,14 @@ got_path:
  *
  * Return: void
  */
-void tracectrl_init_map_info(struct tracectrl *ctrl)
+static void tracectrl_init_map_info(struct tracectrl *ctrl)
 __must_hold(&ctrl->mutex)
 {
 	struct task_struct *p;
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
 
-	ctrl->used_map_entries = 0;
+	WARN_ON(ctrl->used_map_info_entries != 0);
 
 	read_lock(&tasklist_lock);
 	mutex_lock(&ctrl->map_info_mutex);
@@ -965,7 +1083,7 @@ __must_hold(&ctrl->mutex)
 			continue;
 		down_read(&mm->mmap_sem);
 		for (vma = mm->mmap; vma; vma = vma->vm_next)
-			tracectrl_insert_map(ctrl, vma, p);
+			tracectrl_insert_map(ctrl, vma, p, GFP_KERNEL);
 		up_read(&mm->mmap_sem);
 	}
 	mutex_unlock(&ctrl->map_info_mutex);
@@ -986,7 +1104,7 @@ __must_hold(&ctrl->mutex)
 static void tracectrl_clear_sched_info(struct tracectrl *ctrl)
 __must_hold(&ctrl->mutex)
 {
-	struct sched_info_page *page, *next;
+	struct tracectrl_page *page, *next;
 	list_for_each_entry_safe(page, next, &ctrl->sched_info_pages, list) {
 		list_del(&page->list);
 		free_page((unsigned long) page);
@@ -1004,7 +1122,7 @@ static void tracectrl_mmap_event(struct mmap_notifier *notifier,
 		container_of(notifier, struct tracectrl, mmap_notifier);
 
 	mutex_lock(&ctrl->map_info_mutex);
-	tracectrl_insert_map(ctrl, vma, current);
+	tracectrl_insert_map(ctrl, vma, current, GFP_ATOMIC);
 	mutex_unlock(&ctrl->map_info_mutex);
 }
 
@@ -1105,7 +1223,9 @@ static int tracectrl_probe(struct platform_device *pdev)
 	spin_lock_init(&ctrl->sched_info_lock);
 	mutex_init(&ctrl->map_info_mutex);
 	spin_lock_init(&ctrl->lock);
+	INIT_LIST_HEAD(&ctrl->dma_buf_pages);
 	INIT_LIST_HEAD(&ctrl->sched_info_pages);
+	INIT_LIST_HEAD(&ctrl->map_info_pages);
 
 	res = sysfs_create_group(&pdev->dev.kobj, &tracectrl_attr_group);
 	if (res < 0) {
@@ -1218,6 +1338,8 @@ static char *tracectrl_devnode(struct device *dev, umode_t *mode)
 static int __init tracectrl_module_init(void)
 {
 	int res;
+
+	BUILD_BUG_ON(sizeof(struct tracectrl_page) != PAGE_SIZE);
 
 	tracectrl_class.name = "tracectrl";
 	tracectrl_class.owner = THIS_MODULE;
