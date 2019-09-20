@@ -98,7 +98,7 @@
 #define ALIGNMENT		4
 
 /* BUFFER_ALIGN(adr) calculates the number of bytes to the next alignment. */
-#define BUFFER_ALIGN(adr) ((ALIGNMENT - ((u32) adr)) % ALIGNMENT)
+#define BUFFER_ALIGN(adr) ((ALIGNMENT - ((ulong) adr)) % ALIGNMENT)
 
 #ifdef __BIG_ENDIAN
 #define xemaclite_readl		ioread32be
@@ -130,8 +130,8 @@ struct net_local {
 
 	bool tx_ping_pong;
 	bool rx_ping_pong;
-	u32 next_tx_buf_to_use;
-	u32 next_rx_buf_to_use;
+	ulong next_tx_buf_to_use;
+	ulong next_rx_buf_to_use;
 	void __iomem *base_addr;
 
 	spinlock_t reset_lock;
@@ -338,7 +338,7 @@ static int xemaclite_send_data(struct net_local *drvdata, u8 *data,
 		/* If the expected buffer is full, try the other buffer,
 		 * if it is configured in HW */
 
-		addr = (void __iomem __force *)((u32 __force)addr ^
+		addr = (void __iomem __force *)((ulong __force)addr ^
 						 XEL_BUFFER_OFFSET);
 		reg_data = xemaclite_readl(addr + XEL_TSR_OFFSET);
 
@@ -396,7 +396,7 @@ static u16 xemaclite_recv_data(struct net_local *drvdata, u8 *data, int maxlen)
 		 * out of sync, do not update the 'next_rx_buf_to_use' since it
 		 * will correct on subsequent calls */
 		if (drvdata->rx_ping_pong != 0)
-			addr = (void __iomem __force *)((u32 __force)addr ^
+			addr = (void __iomem __force *)((unsigned long __force)addr ^
 							 XEL_BUFFER_OFFSET);
 		else
 			return 0;	/* No data was available */
@@ -735,7 +735,7 @@ static int xemaclite_mdio_read(struct mii_bus *bus, int phy_id, int reg)
 {
 	struct net_local *lp = bus->priv;
 	u32 ctrl_reg;
-	u32 rc;
+	int rc;
 
 	if (xemaclite_mdio_wait(lp))
 		return -ETIMEDOUT;
@@ -754,7 +754,7 @@ static int xemaclite_mdio_read(struct mii_bus *bus, int phy_id, int reg)
 	if (xemaclite_mdio_wait(lp))
 		return -ETIMEDOUT;
 
-	rc = xemaclite_readl(lp->base_addr + XEL_MDIORD_OFFSET);
+	rc = (int) xemaclite_readl(lp->base_addr + XEL_MDIORD_OFFSET);
 
 	dev_dbg(&lp->ndev->dev,
 		"xemaclite_mdio_read(phy_id=%i, reg=%x) == %x\n",
@@ -1160,9 +1160,9 @@ static int xemaclite_of_probe(struct platform_device *ofdev)
 	}
 
 	dev_info(dev,
-		 "Xilinx EmacLite at 0x%08X mapped to 0x%08X, irq=%d\n",
-		 (unsigned int __force)ndev->mem_start,
-		 (unsigned int __force)lp->base_addr, ndev->irq);
+		 "Xilinx EmacLite at 0x%08lX mapped to 0x%08lX, irq=%d\n",
+		 (unsigned long __force)ndev->mem_start,
+		 (unsigned long __force)lp->base_addr, ndev->irq);
 	return 0;
 
 error:
