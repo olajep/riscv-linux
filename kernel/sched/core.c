@@ -2492,6 +2492,7 @@ void preempt_notifier_register(struct preempt_notifier *notifier)
 EXPORT_SYMBOL_GPL(preempt_notifier_register);
 
 static HLIST_HEAD(preempt_all_notifiers);
+static DEFINE_SPINLOCK(preempt_all_notifiers_lock);
 /**
  * preempt_notifier_all_register - tell me when *any* task is being preempted &
  * rescheduled. Not just the current task.
@@ -2500,10 +2501,14 @@ static HLIST_HEAD(preempt_all_notifiers);
  */
 void preempt_notifier_all_register(struct preempt_notifier *notifier)
 {
+	unsigned long flags;
+
 	if (!static_branch_unlikely(&preempt_notifier_key))
 		WARN(1, "registering preempt_notifier while notifiers disabled\n");
 
-	hlist_add_head(&notifier->link, &preempt_all_notifiers);
+	spin_lock_irqsave(&preempt_all_notifiers_lock, flags);
+	hlist_add_head_rcu(&notifier->link, &preempt_all_notifiers);
+	spin_unlock_irqrestore(&preempt_all_notifiers_lock, flags);
 }
 EXPORT_SYMBOL_GPL(preempt_notifier_all_register);
 
@@ -2519,6 +2524,22 @@ void preempt_notifier_unregister(struct preempt_notifier *notifier)
 }
 EXPORT_SYMBOL_GPL(preempt_notifier_unregister);
 
+/**
+ * preempt_notifier_all_unregister - no longer interested in preemption notifications
+ * @notifier: notifier struct to unregister
+ *
+ * This is *not* safe to call from within a preemption notifier.
+ */
+void preempt_notifier_all_unregister(struct preempt_notifier *notifier)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&preempt_all_notifiers_lock, flags);
+	hlist_del_rcu(&notifier->link);
+	spin_unlock_irqrestore(&preempt_all_notifiers_lock, flags);
+	synchronize_rcu();
+}
+EXPORT_SYMBOL_GPL(preempt_notifier_all_unregister);
 
 static void __fire_sched_in_preempt_notifiers(struct task_struct *curr)
 {
@@ -2527,8 +2548,10 @@ static void __fire_sched_in_preempt_notifiers(struct task_struct *curr)
 	hlist_for_each_entry(notifier, &curr->preempt_notifiers, link)
 		notifier->ops->sched_in(notifier, raw_smp_processor_id());
 
-	hlist_for_each_entry(notifier, &preempt_all_notifiers, link)
+	rcu_read_lock();
+	hlist_for_each_entry_rcu(notifier, &preempt_all_notifiers, link)
 		notifier->ops->sched_in(notifier, raw_smp_processor_id());
+	rcu_read_unlock();
 }
 
 static __always_inline void fire_sched_in_preempt_notifiers(struct task_struct *curr)
@@ -2546,8 +2569,10 @@ __fire_sched_out_preempt_notifiers(struct task_struct *curr,
 	hlist_for_each_entry(notifier, &curr->preempt_notifiers, link)
 		notifier->ops->sched_out(notifier, next);
 
-	hlist_for_each_entry(notifier, &preempt_all_notifiers, link)
+	rcu_read_lock();
+	hlist_for_each_entry_rcu(notifier, &preempt_all_notifiers, link)
 		notifier->ops->sched_out(notifier, next);
+	rcu_read_unlock();
 }
 
 static __always_inline void

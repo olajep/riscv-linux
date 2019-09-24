@@ -576,7 +576,7 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 
 	mmap_notifier_unregister(&ctrl->mmap_notifier);
 	mmap_notifier_dec();
-	preempt_notifier_unregister(&ctrl->preempt_notifier);
+	preempt_notifier_all_unregister(&ctrl->preempt_notifier);
 	preempt_notifier_dec();
 	synchronize_rcu();
 
