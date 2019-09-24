@@ -1663,30 +1663,38 @@ int vma_wants_writenotify(struct vm_area_struct *vma, pgprot_t vm_page_prot)
 
 static DEFINE_STATIC_KEY_FALSE(mmap_notifier_key);
 static HLIST_HEAD(mmap_notifiers);
+static DEFINE_SPINLOCK(mmap_notifiers_lock);
 /**
  * mmap_notifier_register - tell me about mmap events.
- * TODO: LOCKING!?!?
  * @notifier: notifier struct to register
  */
 void mmap_notifier_register(struct mmap_notifier *notifier)
 {
+	unsigned long flags;
+
 	if (!static_branch_unlikely(&mmap_notifier_key))
 		WARN(1, "registering mmap_notifier while notifiers disabled\n");
 
-	hlist_add_head(&notifier->link, &mmap_notifiers);
+	spin_lock_irqsave(&mmap_notifiers_lock, flags);
+	hlist_add_head_rcu(&notifier->link, &mmap_notifiers);
+	spin_unlock_irqrestore(&mmap_notifiers_lock, flags);
 }
 EXPORT_SYMBOL_GPL(mmap_notifier_register);
 
 /**
  * mmap_notifier_unregister - no longer interested in mmap notifications
- * TODO: LOCKING!?!?
  * @notifier: notifier struct to unregister
  *
  * This is *not* safe to call from within a mmap notifier.
  */
 void mmap_notifier_unregister(struct mmap_notifier *notifier)
 {
-	hlist_del(&notifier->link);
+	unsigned long flags;
+
+	spin_lock_irqsave(&mmap_notifiers_lock, flags);
+	hlist_del_rcu(&notifier->link);
+	spin_unlock_irqrestore(&mmap_notifiers_lock, flags);
+	synchronize_rcu();
 }
 EXPORT_SYMBOL_GPL(mmap_notifier_unregister);
 
@@ -1706,8 +1714,10 @@ static __always_inline void __fire_mmap_notifiers(struct vm_area_struct *vma)
 {
 	struct mmap_notifier *notifier;
 
-	hlist_for_each_entry(notifier, &mmap_notifiers, link)
+	rcu_read_lock();
+	hlist_for_each_entry_rcu(notifier, &mmap_notifiers, link)
 		notifier->ops->mmap(notifier, vma);
+	rcu_read_unlock();
 }
 
 static inline void fire_mmap_event_notifiers(struct vm_area_struct *vma)
