@@ -930,7 +930,7 @@ __must_hold(&ctrl->sched_info_lock)
 	entry->kthread		= !!(task->flags & PF_KTHREAD);
 	entry->task.pid		= (int) task_pid_nr(task);
 	entry->task.ppid	= (int) task_ppid_nr(task);
-	strncpy(entry->task.comm, task->comm, TASK_COMM_LEN);
+	strlcpy(entry->task.comm, task->comm, TASK_COMM_LEN);
 }
 
 static void tracectrl_sched_out(struct preempt_notifier *notifier,
@@ -1029,7 +1029,9 @@ __must_hold(&ctrl->map_info_mutex)
 		goto got_path;
 	}
 got_path:
-	strlcpy(entry->path, path, ARRAY_SIZE(entry->path));
+	len = strlcpy(entry->path, path, ARRAY_SIZE(entry->path));
+	len = min(len, ARRAY_SIZE(entry->path) - 1);
+	memset(entry->path + len, 0, ARRAY_SIZE(entry->path) - len);
 	if (buf)
 		kfree(buf);
 }
