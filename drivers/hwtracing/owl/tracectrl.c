@@ -51,6 +51,7 @@
 #define CONFIG_ENABLE				1
 #define CONFIG_IRQEN				2
 #define CONFIG_IGNORE_ILLEGAL_INSN		4
+#define CONFIG_FIFO_FULL_IRQEN			8
 
 #define MAX_DEVICES 1 /* TODO: (num_possible_cpus()) */
 
@@ -100,7 +101,7 @@ struct tracectrl {
 	size_t used_dma_bufs;
 
 	/* TODO: Optimize this. In many cases we the scheduler will do task A
-	 * --> kthread-> task A. So if we keep track of the previously
+	 * --> kthread --> task A. So if we keep track of the previously
 	 * scheduled user task (by pid?), we don't need to insert
 	 * duplicates. */
 	struct list_head sched_info_pages;
@@ -398,7 +399,8 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 /**
  * tracectrl_update_buf - Update buffer pointer in control regs
  * @ctrl:	tracectrl device
- * @pos:	buffer position
+ * @cpu:	which cpu
+ * @buf:	buf0 or buf1
  * @addr:	buffer pointer
  * @clear_full:	clear the full flag
  *
@@ -406,18 +408,25 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
  *
  * Return: void
  */
-static void tracectrl_update_buf(struct tracectrl *ctrl, unsigned long pos,
-				 u64 addr, bool clear_full)
+static void tracectrl_update_buf(struct tracectrl *ctrl, unsigned long cpu,
+				 unsigned long buf, u64 addr, bool clear_full)
 __must_hold(&ctrl->lock)
 {
-	unsigned long offs;
+	unsigned long offs, pos, bit;
+	u64 read;
 
 	/* TODO: Support more than 32 cpus */
+	pos = 2 * cpu + buf;
 	offs = TRACECTRL_BUF_BASE + 8 * pos;
+	bit = 4 * cpu + buf;
+
 	tracectrl_reg_writeq(addr, ctrl, offs);
-	if (clear_full) {
-		tracectrl_reg_writeq(BIT_ULL(pos), ctrl, TRACECTRL_STATUS_BASE);
-	}
+	read = tracectrl_reg_readq(ctrl, offs);
+	dev_dbg(&ctrl->dev,
+		"%s: cpu=%lu buf=%lu offs=0x%lx addr=0x%llx read=0x%llx\n",
+		 __func__, cpu, buf, offs, addr, read);
+	if (clear_full)
+		tracectrl_reg_writeq(BIT_ULL(bit), ctrl, TRACECTRL_STATUS_BASE);
 }
 
 /**
@@ -532,8 +541,8 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 			tracectrl_free_all_dma_bufs(ctrl);
 			return -ENOMEM;
 		}
-		tracectrl_update_buf(ctrl, 2 * cpu + 0, buf0->handle, true);
-		tracectrl_update_buf(ctrl, 2 * cpu + 1, buf1->handle, true);
+		tracectrl_update_buf(ctrl, cpu, 0, buf0->handle, true);
+		tracectrl_update_buf(ctrl, cpu, 1, buf1->handle, true);
 	}
 
 	tracectrl_clear_map_info(ctrl);
@@ -1134,29 +1143,58 @@ static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 {
 	struct tracectrl *ctrl = dev_id;
 	u32 config;
-	u64 status, first_status;
-	unsigned long pos, cpu;
+	u64 status, cpu_status, first_status;
+	unsigned long pos, cpu, buf;
 	int handled = 0;
 	dma_addr_t addr = 0;
-	struct tracectrl_dma_buf *buf;
+	struct tracectrl_dma_buf *dma_buf;
 	unsigned long flags;
 
 	spin_lock_irqsave(&ctrl->lock, flags);
 	status = tracectrl_reg_readq(ctrl, TRACECTRL_STATUS_BASE);
 	first_status = status;
 	while (status) {
-		/* TODO: Iterate over all instead of just first 32 cpu (64/2) */
+		/* TODO: Iterate over all instead of just first 16 cpus (64/4) */
 		pos = __ffs64(status);
-		cpu = pos / 2;
+		cpu = pos / 4;
+		buf = pos % 2;
+		cpu_status = (status >> (4 * cpu)) & 0xf;
 
-		if (((status >> (2 * cpu)) & 3) == 3) {
+		if (cpu_status & 0xc) {
+			if (cpu_status & 0x4) {
+				dev_warn(&ctrl->dev,
+					 "%s: fifo half full for cpu=%lu.\n",
+					 __func__, cpu);
+			}
+			if (cpu_status & 0x8) {
+				dev_err(&ctrl->dev,
+					 "%s: fifo overflow for cpu=%lu. trace likely incomplete.\n",
+					 __func__, cpu);
+				dev_err(&ctrl->dev,
+					 "%s: disabling fifo_full interrupt.\n",
+					 __func__);
+				config = tracectrl_reg_readl(ctrl,
+							     TRACECTRL_CONFIG);
+				config &= ~CONFIG_FIFO_FULL_IRQEN;
+				tracectrl_reg_writel(config, ctrl,
+						     TRACECTRL_CONFIG);
+			}
+			/* Clear bits */
+			tracectrl_reg_writeq(((cpu_status & 0xc) << (cpu * 4)),
+					     ctrl, TRACECTRL_STATUS_BASE);
+			status &= ~(0xc << (cpu * 4));
+			handled++;
+			continue;
+		}
+
+		if ((cpu_status & 0x3) == 0x3) {
 			dev_warn(&ctrl->dev,
 				"%s: both buffer full flags set for cpu=%lu. trace likely incomplete.\n",
 				__func__, cpu);
 		}
 
-		buf = tracectrl_dma_buf_alloc(ctrl, cpu, GFP_ATOMIC);
-		if (!buf) {
+		dma_buf = tracectrl_dma_buf_alloc(ctrl, cpu, GFP_ATOMIC);
+		if (!dma_buf) {
 			/* TODO return wake thread and handle alloc there if
 			 * it failed here. */
 			dev_err(&ctrl->dev,
@@ -1166,8 +1204,9 @@ static irqreturn_t tracectrl_irq_handler(int irq, void *dev_id)
 			config &= ~CONFIG_IRQEN;
 			tracectrl_reg_writel(config, ctrl, TRACECTRL_CONFIG);
 		} else {
-			tracectrl_update_buf(ctrl, pos, buf->handle, true);
-			addr = buf->handle;
+			tracectrl_update_buf(ctrl, cpu, buf, dma_buf->handle,
+					     true);
+			addr = dma_buf->handle;
 		}
 		handled++;
 		status &= ~BIT_ULL(pos);
