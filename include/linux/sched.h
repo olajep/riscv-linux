@@ -203,6 +203,14 @@ struct task_group;
 
 #endif
 
+#ifdef CONFIG_OWL_TRACECTRL
+#define set_owl_comm_recorded(task) (task)->owl_comm_recorded = 1
+#define clear_owl_comm_recorded(task) (task)->owl_comm_recorded = 0
+#else
+#define set_owl_comm_recorded(task)
+#define clear_owl_comm_recorded(task)
+#endif
+
 /* Task command name length: */
 #define TASK_COMM_LEN			16
 
@@ -733,6 +741,9 @@ struct task_struct {
 #ifdef CONFIG_CGROUPS
 	/* disallow userland-initiated cgroup migration */
 	unsigned			no_cgroup_migration:1;
+#endif
+#if CONFIG_OWL_TRACECTRL
+	unsigned			owl_comm_recorded:1;
 #endif
 
 	unsigned long			atomic_flags; /* Flags requiring atomic access. */

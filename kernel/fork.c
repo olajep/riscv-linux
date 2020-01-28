@@ -2000,6 +2000,7 @@ static __latent_entropy struct task_struct *copy_process(
 	cgroup_post_fork(p);
 	cgroup_threadgroup_change_end(current);
 	perf_event_fork(p);
+	clear_owl_comm_recorded(p);
 
 	trace_task_newtask(p, clone_flags);
 	uprobe_copy_process(p, clone_flags);
