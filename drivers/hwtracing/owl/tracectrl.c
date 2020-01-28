@@ -71,8 +71,8 @@ struct tracectrl_dma_buf {
 
 #define N_DMA_BUFS_PER_PAGE	N_PER_PAGE(struct tracectrl_dma_buf)
 #define SZ_DMA_BUFS_PER_PAGE	SZ_PER_PAGE(struct tracectrl_dma_buf)
-#define N_SCHED_INFO_PER_PAGE	N_PER_PAGE(struct owl_sched_info)
-#define SZ_SCHED_INFO_PER_PAGE	SZ_PER_PAGE(struct owl_sched_info)
+#define N_SCHED_INFO_PER_PAGE	N_PER_PAGE(struct owl_sched_info_full)
+#define SZ_SCHED_INFO_PER_PAGE	SZ_PER_PAGE(struct owl_sched_info_full)
 #define N_MAP_INFO_PER_PAGE	N_PER_PAGE(struct owl_map_info)
 #define SZ_MAP_INFO_PER_PAGE	SZ_PER_PAGE(struct owl_map_info)
 
@@ -80,7 +80,7 @@ struct tracectrl_page {
 	struct list_head	list;
 	union {
 		struct tracectrl_dma_buf dma_bufs[N_DMA_BUFS_PER_PAGE];
-		struct owl_sched_info	 sched_info[N_SCHED_INFO_PER_PAGE];
+		struct owl_sched_info_full sched_info[N_SCHED_INFO_PER_PAGE];
 		struct owl_map_info	 map_info[N_MAP_INFO_PER_PAGE];
 	};
 };
@@ -349,7 +349,7 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 	status->tracebuf_size = total_tracebuf_size(ctrl);
 	spin_lock_irqsave(&ctrl->sched_info_lock, flags);
 	status->sched_info_size =
-		ctrl->used_sched_info_entries * sizeof(struct owl_sched_info);
+		ctrl->used_sched_info_entries * sizeof(struct owl_sched_info_full);
 	spin_unlock_irqrestore(&ctrl->sched_info_lock, flags);
 	mutex_lock(&ctrl->map_info_mutex);
 	status->map_info_size =
@@ -782,8 +782,8 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 	p = header->schedinfobuf;
 	remaining = min_t(u64, header->max_sched_info_size,
 			  ctrl->used_sched_info_entries *
-				sizeof(struct owl_sched_info));
-	remaining -= remaining % sizeof(struct owl_sched_info);
+				sizeof(struct owl_sched_info_full));
+	remaining -= remaining % sizeof(struct owl_sched_info_full);
 	/* Entries inserted in stack fashion so walk the list in reverse */
 	list_for_each_entry_reverse(page, &ctrl->sched_info_pages, list) {
 		n = min(remaining, SZ_SCHED_INFO_PER_PAGE);
@@ -907,7 +907,7 @@ static void tracectrl_insert_sched_info(struct tracectrl *ctrl,
 __must_hold(&ctrl->sched_info_lock)
 {
 	struct tracectrl_page *page;
-	struct owl_sched_info *entry;
+	struct owl_sched_info_full *entry;
 	const unsigned long offs =
 		ctrl->used_sched_info_entries % N_SCHED_INFO_PER_PAGE;
 
@@ -932,14 +932,18 @@ __must_hold(&ctrl->sched_info_lock)
 
 	entry			= &page->sched_info[offs];
 	memset(entry, 0, sizeof(*entry));
-	entry->timestamp	= get_timestamp();
-	entry->cpu		= (u16) smp_processor_id();
-	entry->has_mm		= task->mm != NULL;
-	entry->in_execve	= task->in_execve;
-	entry->kthread		= !!(task->flags & PF_KTHREAD);
-	entry->task.pid		= (int) task_pid_nr(task);
-	entry->task.ppid	= (int) task_ppid_nr(task);
-	strlcpy(entry->task.comm, task->comm, TASK_COMM_LEN);
+	entry->base.timestamp	= get_timestamp();
+	entry->base.cpu		= (u16) smp_processor_id();
+	entry->base.has_mm	= task->mm != NULL;
+	entry->base.in_execve	= task->in_execve;
+	entry->base.kthread	= !!(task->flags & PF_KTHREAD);
+	entry->base.pid		= (int) task_pid_nr(task);
+	entry->base.ppid	= (int) task_ppid_nr(task);
+	entry->base.full_trace	= !task->owl_comm_recorded;
+	if (!task->owl_comm_recorded) {
+		strlcpy(entry->comm, task->comm, TASK_COMM_LEN);
+		task->owl_comm_recorded = 1;
+	}
 }
 
 static void tracectrl_sched_out(struct preempt_notifier *notifier,
@@ -1089,6 +1093,8 @@ __must_hold(&ctrl->mutex)
 	read_lock(&tasklist_lock);
 	mutex_lock(&ctrl->map_info_mutex);
 	for_each_process(p) {
+		p->owl_comm_recorded = 0;
+
 		mm = p->mm;
 		if (!mm || p->flags & PF_KTHREAD)
 			continue;

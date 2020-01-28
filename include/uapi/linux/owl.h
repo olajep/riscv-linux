@@ -105,12 +105,27 @@ struct owl_task {
 struct owl_sched_info {
 	__u64		timestamp; /* use relative to save space */
 	__u16		cpu; /* 65536 cpus should be enough for now */
+	unsigned	full_trace:1; /* this is a full trace (has comm) */
 	unsigned	has_mm:1;
 	unsigned	in_execve:1;
 	unsigned	kthread:1;
-	__u64		:45; /* pad */
-	struct owl_task	task;
+	unsigned	:12; /* pad */
+	int		pid;
+	int		ppid;
 } __attribute__((packed));
+
+struct owl_sched_info_full {
+	struct owl_sched_info base;
+	char		comm[OWL_TASK_COMM_LEN];
+} __attribute__((packed));
+
+static inline size_t owl_sched_info_entry_size(struct owl_sched_info *entry)
+{
+	if (entry->full_trace)
+		return sizeof(struct owl_sched_info_full);
+	else
+		return sizeof(struct owl_sched_info);
+}
 
 #define OWL_PATH_MAX 128
 struct owl_map_info {
