@@ -82,6 +82,7 @@ struct tracectrl_page {
 		struct tracectrl_dma_buf dma_bufs[N_DMA_BUFS_PER_PAGE];
 		struct owl_sched_info_full sched_info[N_SCHED_INFO_PER_PAGE];
 		struct owl_map_info	 map_info[N_MAP_INFO_PER_PAGE];
+		u8 byte[PAYLOAD_PER_PAGE];
 	};
 };
 
@@ -105,6 +106,7 @@ struct tracectrl {
 	 * scheduled user task (by pid?), we don't need to insert
 	 * duplicates. */
 	struct list_head sched_info_pages;
+	size_t sched_info_page_offs; /* buffer offset in current page */
 	size_t used_sched_info_entries;
 	spinlock_t sched_info_lock;
 
@@ -786,15 +788,31 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 	remaining -= remaining % sizeof(struct owl_sched_info_full);
 	/* Entries inserted in stack fashion so walk the list in reverse */
 	list_for_each_entry_reverse(page, &ctrl->sched_info_pages, list) {
-		n = min(remaining, SZ_SCHED_INFO_PER_PAGE);
-		if (copy_to_user(p, page->sched_info, n))
-			return -EFAULT;
-		remaining -= n;
-		p += n;
-		header->sched_info_size += n;
-		if (!remaining)
-			break;
+		size_t offs = 0, entry_size;
+		struct owl_sched_info *entry;
+		while (true) {
+			entry = (struct owl_sched_info *) &page->byte[offs];
+			entry_size = entry->full_trace ?
+				sizeof(struct owl_sched_info_full) :
+				sizeof(struct owl_sched_info);
+
+			if (offs + entry_size > PAYLOAD_PER_PAGE) {
+				/* This is just padding. Next entry is in
+				 * another page. */
+				break;
+			}
+
+			n = min(remaining, entry_size);
+			if (copy_to_user(p, &page->byte[offs], n))
+				return -EFAULT;
+			remaining -= n;
+			p += n;
+			header->sched_info_size += n;
+			if (!remaining)
+				goto sched_info_copy_done;
+		}
 	}
+sched_info_copy_done:
 
 	/* Copy mapping info */
 	p = header->mapinfobuf;
@@ -896,22 +914,29 @@ static void tracectrl_sched_in(struct preempt_notifier *notifier, int cpu)
 }
 
 /**
- * tracectrl_insert_sched_info - Record scheduling event
+ * tracectrl_alloc_sched_info_entry - Allocate scheduling info entry
  * @ctrl:	tracectrl device
- * @task:	scheduled out task
+ * @size:	size of entry
  *
  * NB: ctrl->sched_info_lock must be held by the caller.
+ *
+ * Return: Pointer to allocated entry
  */
-static void tracectrl_insert_sched_info(struct tracectrl *ctrl,
-				      struct task_struct *task)
+static void *tracectrl_alloc_sched_info(struct tracectrl *ctrl, size_t size)
 __must_hold(&ctrl->sched_info_lock)
 {
 	struct tracectrl_page *page;
-	struct owl_sched_info_full *entry;
-	const unsigned long offs =
-		ctrl->used_sched_info_entries % N_SCHED_INFO_PER_PAGE;
+	void *ptr;
 
-	if (offs == 0) {
+	page = list_first_entry(&ctrl->sched_info_pages,
+				struct tracectrl_page,
+				list);
+	if (ctrl->sched_info_page_offs + size > PAYLOAD_PER_PAGE) {
+		/* Set remaining bits of previous page to 1 to indicate end of
+		 * page. Entries will never overlap two pages. */
+		ptr = &page->byte[ctrl->sched_info_page_offs];
+		memset(ptr, 0xff, PAYLOAD_PER_PAGE - ctrl->sched_info_page_offs);
+
 		/* Spin lock is held so we need to be atomic??
 		 * Use a mutex instead ???
 		 * But we can't have any scheduling events here, that would
@@ -919,18 +944,42 @@ __must_hold(&ctrl->sched_info_lock)
 		page = (struct tracectrl_page *) __get_free_page(GFP_ATOMIC);
 		if (!page) {
 			dev_err(&ctrl->dev, "%s: could not alloc\n", __func__);
-			return;
+			return NULL;
 		}
 		/* Insert at the head. */
 		list_add(&page->list, &ctrl->sched_info_pages);
+
+		ctrl->sched_info_page_offs = size;
 	} else {
-		page = list_first_entry(&ctrl->sched_info_pages,
-					struct tracectrl_page,
-					list);
+		ctrl->sched_info_page_offs += size;
 	}
+	ptr = &page->byte[ctrl->sched_info_page_offs];
 	ctrl->used_sched_info_entries++;
 
-	entry			= &page->sched_info[offs];
+	return ptr;
+}
+
+/**
+ * tracectrl_insert_sched_info - Record scheduling event
+ * @ctrl:	tracectrl device
+ * @task:	scheduled out task
+ *
+ * NB: ctrl->sched_info_lock must be held by the caller.
+ */
+static void tracectrl_insert_sched_info(struct tracectrl *ctrl,
+				        struct task_struct *task)
+__must_hold(&ctrl->sched_info_lock)
+{
+	struct owl_sched_info_full *entry;
+	size_t entry_size;
+
+	entry_size = task->owl_comm_recorded ?
+			sizeof(struct owl_sched_info) :
+			sizeof(struct owl_sched_info_full);
+	entry = tracectrl_alloc_sched_info(ctrl, entry_size);
+	if (!entry)
+		return;
+
 	memset(entry, 0, sizeof(*entry));
 	entry->base.timestamp	= get_timestamp();
 	entry->base.cpu		= (u16) smp_processor_id();
