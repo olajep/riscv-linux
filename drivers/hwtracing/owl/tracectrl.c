@@ -107,7 +107,7 @@ struct tracectrl {
 	 * duplicates. */
 	struct list_head sched_info_pages;
 	size_t sched_info_page_offs; /* buffer offset in current page */
-	size_t used_sched_info_entries;
+	size_t sched_info_size; /* Total size of scheduling info */
 	spinlock_t sched_info_lock;
 
 	struct list_head map_info_pages;
@@ -350,8 +350,7 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 	status->stream_info_size = nr_cpu_ids * sizeof(struct owl_stream_info);
 	status->tracebuf_size = total_tracebuf_size(ctrl);
 	spin_lock_irqsave(&ctrl->sched_info_lock, flags);
-	status->sched_info_size =
-		ctrl->used_sched_info_entries * sizeof(struct owl_sched_info_full);
+	status->sched_info_size = ctrl->sched_info_size;
 	spin_unlock_irqrestore(&ctrl->sched_info_lock, flags);
 	mutex_lock(&ctrl->map_info_mutex);
 	status->map_info_size =
@@ -715,6 +714,7 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 	header->trace_format = ctrl->trace_format;
 	header->tracebuf_size		= 0;
 	header->sched_info_size		= 0;
+	header->sched_info_entries	= 0;
 	header->map_info_size		= 0;
 	header->stream_info_size	= 0;
 
@@ -785,33 +785,44 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 	/* Copy scheduling info */
 	p = header->schedinfobuf;
 	remaining = min_t(u64, header->max_sched_info_size,
-			  ctrl->used_sched_info_entries *
-				sizeof(struct owl_sched_info_full));
-	remaining -= remaining % sizeof(struct owl_sched_info_full);
+			  ctrl->sched_info_size);
 	/* Entries inserted in stack fashion so walk the list in reverse */
 	list_for_each_entry_reverse(page, &ctrl->sched_info_pages, list) {
-		size_t offs = 0, entry_size;
+		size_t entry_size;
 		struct owl_sched_info *entry;
+
+		offs = 0;
 		while (true) {
+			if (sizeof(struct owl_sched_info) > remaining)
+				goto sched_info_copy_done;
+
+			if (offs >= PAYLOAD_PER_PAGE) {
+				/* Continue to next page */
+				break;
+			}
+
 			entry = (struct owl_sched_info *) &page->byte[offs];
 			entry_size = entry->full_trace ?
 				sizeof(struct owl_sched_info_full) :
 				sizeof(struct owl_sched_info);
 
+			if (entry_size > remaining)
+				goto sched_info_copy_done;
+
 			if (offs + entry_size > PAYLOAD_PER_PAGE) {
-				/* This is just padding. Next entry is in
-				 * another page. */
+				/* Remainder of this page is just padding.
+				 * The next entry is in the next page. */
 				break;
 			}
 
-			n = min(remaining, entry_size);
-			if (copy_to_user(p, &page->byte[offs], n))
+			if (copy_to_user(p, &page->byte[offs], entry_size))
 				return -EFAULT;
-			remaining -= n;
-			p += n;
-			header->sched_info_size += n;
-			if (!remaining)
-				goto sched_info_copy_done;
+
+			p += entry_size;
+			offs += entry_size;
+			header->sched_info_size += entry_size;
+			header->sched_info_entries++;
+			remaining -= entry_size;
 		}
 	}
 sched_info_copy_done:
@@ -928,17 +939,24 @@ static void *tracectrl_alloc_sched_info(struct tracectrl *ctrl, size_t size)
 __must_hold(&ctrl->sched_info_lock)
 {
 	struct tracectrl_page *page;
+	bool alloc_page, pad_remainder;
 	void *ptr;
 
-	page = list_first_entry(&ctrl->sched_info_pages,
-				struct tracectrl_page,
-				list);
-	if (ctrl->sched_info_page_offs + size > PAYLOAD_PER_PAGE) {
+	pad_remainder = ctrl->sched_info_page_offs + size > PAYLOAD_PER_PAGE;
+	alloc_page = ctrl->sched_info_size == 0 || pad_remainder;
+
+	if (unlikely(pad_remainder)) {
+		page = list_first_entry(&ctrl->sched_info_pages,
+					struct tracectrl_page,
+					list);
+
 		/* Set remaining bits of previous page to 1 to indicate end of
 		 * page. Entries will never overlap two pages. */
 		ptr = &page->byte[ctrl->sched_info_page_offs];
 		memset(ptr, 0xff, PAYLOAD_PER_PAGE - ctrl->sched_info_page_offs);
+	}
 
+	if (unlikely(alloc_page)) {
 		/* Spin lock is held so we need to be atomic??
 		 * Use a mutex instead ???
 		 * But we can't have any scheduling events here, that would
@@ -950,13 +968,16 @@ __must_hold(&ctrl->sched_info_lock)
 		}
 		/* Insert at the head. */
 		list_add(&page->list, &ctrl->sched_info_pages);
-
-		ctrl->sched_info_page_offs = size;
+		ctrl->sched_info_page_offs = 0;
 	} else {
-		ctrl->sched_info_page_offs += size;
+		page = list_first_entry(&ctrl->sched_info_pages,
+					struct tracectrl_page,
+					list);
 	}
+
 	ptr = &page->byte[ctrl->sched_info_page_offs];
-	ctrl->used_sched_info_entries++;
+	ctrl->sched_info_size += size;
+	ctrl->sched_info_page_offs += size;
 
 	return ptr;
 }
@@ -982,7 +1003,7 @@ __must_hold(&ctrl->sched_info_lock)
 	if (!entry)
 		return;
 
-	memset(entry, 0, sizeof(*entry));
+	memset(entry, 0, entry_size);
 	entry->base.timestamp	= get_timestamp();
 	entry->base.cpu		= (u16) smp_processor_id();
 	entry->base.has_mm	= task->mm != NULL;
@@ -1180,7 +1201,8 @@ __must_hold(&ctrl->mutex)
 	if (!list_empty(&ctrl->sched_info_pages)) {
 		dev_info(&ctrl->dev, "%s: list not empty!\n", __func__);
 	}
-	ctrl->used_sched_info_entries = 0;
+	ctrl->sched_info_size = 0;
+	ctrl->sched_info_page_offs = 0;
 }
 
 static void tracectrl_mmap_event(struct mmap_notifier *notifier,
