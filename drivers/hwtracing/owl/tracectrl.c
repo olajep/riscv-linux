@@ -670,20 +670,22 @@ __must_hold(&ctrl->lock)
 	list_for_each_entry(page, &ctrl->dma_buf_pages, list) {
 		while (true) {
 			offs = (i - 1) % N_DMA_BUFS_PER_PAGE;
+			buf = &page->dma_bufs[offs];
+
+			if (buf->cpu == cpu) {
+				if (unused_bufs)
+					unused_bufs--;
+				else {
+					ret = buf;
+					goto done;
+				}
+			}
+
 			i--;
 			if (i == 0)
 				goto done;
 			if (offs == 0)
-				continue;
-			buf = &page->dma_bufs[offs];
-			if (buf->cpu != cpu)
-				continue;
-			if (unused_bufs) {
-				unused_bufs--;
-				continue;
-			}
-			ret = buf;
-			goto done;
+				break;
 		}
 	}
 done:
