@@ -119,7 +119,7 @@ struct owl_sched_info_full {
 	char		comm[OWL_TASK_COMM_LEN];
 } __attribute__((packed));
 
-static inline size_t owl_sched_info_entry_size(struct owl_sched_info *entry)
+static inline size_t owl_sched_info_entry_size(const struct owl_sched_info *entry)
 {
 	if (entry->full_trace)
 		return sizeof(struct owl_sched_info_full);
@@ -158,6 +158,7 @@ struct owl_trace_header {
 	enum owl_trace_format trace_format;
 	__u64 tracebuf_size;	 /* Size of trace buffer */
 	__u64 sched_info_size;	 /* Size of schedinfo */
+	__u64 sched_info_entries;/* Total number of scheduling entries */
 	__u64 map_info_size;	 /* Size of mapping info */
 	__u64 stream_info_size;	 /* Size of cpu trace stream info */
 };
