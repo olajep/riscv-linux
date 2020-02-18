@@ -156,6 +156,8 @@ struct owl_trace_header {
 
 	/* Filled in by kernel */
 	enum owl_trace_format trace_format;
+	__s64 start_time;	 /* ns since Unix epoch */
+	__s64 stop_time;	 /* ns since Unix epoch */
 	__u64 tracebuf_size;	 /* Size of trace buffer */
 	__u64 sched_info_size;	 /* Size of schedinfo */
 	__u64 sched_info_entries;/* Total number of scheduling entries */

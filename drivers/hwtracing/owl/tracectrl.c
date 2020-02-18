@@ -88,6 +88,10 @@ struct tracectrl_page {
 
 struct tracectrl {
 	bool enabled;
+
+	s64 start_time;
+	s64 stop_time;
+
 	void __iomem *base_addr;
 	struct mutex mutex;
 	spinlock_t lock;
@@ -552,6 +556,8 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 	preempt_notifier_inc();
 	preempt_notifier_all_register(&ctrl->preempt_notifier);
 
+	ctrl->start_time = ktime_get_real_ns();
+
 	smp_mb();
 	ctrl->enabled = true;
 	smp_mb();
@@ -592,6 +598,7 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 
 	smp_mb();
 
+	ctrl->stop_time = ktime_get_real_ns();
 	ctrl->enabled = false;
 
 	return 0;
@@ -711,12 +718,14 @@ __must_hold(&ctrl->mutex) __must_hold(&ctrl->lock)
 		return -EBUSY;
 
 	/* Initialize header kernel side values */
-	header->trace_format = ctrl->trace_format;
+	header->trace_format		= ctrl->trace_format;
 	header->tracebuf_size		= 0;
 	header->sched_info_size		= 0;
 	header->sched_info_entries	= 0;
 	header->map_info_size		= 0;
 	header->stream_info_size	= 0;
+	header->start_time		= ctrl->start_time;
+	header->stop_time		= ctrl->stop_time;
 
 	if (!ctrl->used_dma_bufs)
 		return 0;
